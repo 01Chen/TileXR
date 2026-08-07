@@ -4,7 +4,7 @@
 #include "planner_common.h"
 #include "tilexr_types.h"
 
-namespace TileXRMoonEp {
+namespace TileXRMoonEpV3 {
 namespace {
 
 bool IsA5(const TileXR::CommArgs &commArgs)
@@ -124,4 +124,4 @@ int TileXRMoonEpPrepareLaunchContext(const PlannerParams &params, PlannerLaunchC
     return TileXR::TILEXR_SUCCESS;
 }
 
-} // namespace TileXRMoonEp
+} // namespace TileXRMoonEpV3

@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-namespace TileXRMoonEp {
+namespace TileXRMoonEpV3 {
 
 struct PlannerLayout {
     int64_t rankSize = 0;
@@ -34,6 +34,6 @@ uint64_t TileXRMoonEpAlignUp(uint64_t value, uint64_t alignment);
 int TileXRMoonEpBuildPlannerLayout(int64_t rankSize, int64_t s, int64_t k,
     int64_t expertCount, int64_t b, int64_t tokenPadding, PlannerLayout *out);
 
-} // namespace TileXRMoonEp
+} // namespace TileXRMoonEpV3
 
 #endif // TILEXR_MOONEP_PLANNER_LAYOUT_H

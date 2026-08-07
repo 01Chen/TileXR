@@ -55,16 +55,21 @@ def test_script_prints_final_plog_path_before_python_launch() -> None:
     assert log_path_report < launcher_call
 
 
-def test_script_forces_ipc_only_tilexr_transport() -> None:
-    udma_disable = SCRIPT.index("export TILEXR_ENABLE_UDMA=0")
-    launcher_call = SCRIPT.index("python -m tools.moonep.launcher")
-    assert udma_disable < launcher_call
+def test_script_disables_tilexr_udma_only_for_single_rank() -> None:
+    single_rank_override = '''if [[ "${rank_size}" == "1" ]]; then
+    export TILEXR_ENABLE_UDMA=0
+fi'''
+    assert single_rank_override in SCRIPT
+    assert SCRIPT.count("export TILEXR_ENABLE_UDMA=") == 1
+    assert SCRIPT.index(single_rank_override) < SCRIPT.index(
+        "python -m tools.moonep.launcher"
+    )
 
 
 def test_script_selects_manual_small_through_case_id_only() -> None:
     assert "-c|--case-id" in SCRIPT
     assert 'case_id="$2"' in SCRIPT
-    assert 'case_id="skewed-padding"' in SCRIPT
+    assert 'case_id="planning-no-dedup"' in SCRIPT
     assert "--manual-small" not in SCRIPT
     assert '--case-ids "${case_id}"' in SCRIPT
     assert 'summary_file="${output_dir}/${case_id}/summary.json"' in SCRIPT

@@ -7,7 +7,7 @@
 #include "planner_layout.h"
 #include "tilexr_api.h"
 
-namespace TileXRMoonEp {
+namespace TileXRMoonEpV3 {
 
 struct PlannerParams {
     const int32_t *topkExpertIds = nullptr;
@@ -45,6 +45,6 @@ int TileXRMoonEpValidateParams(const PlannerParams &params, const TileXR::CommAr
 
 int TileXRMoonEpPrepareLaunchContext(const PlannerParams &params, PlannerLaunchContext *context);
 
-} // namespace TileXRMoonEp
+} // namespace TileXRMoonEpV3
 
 #endif // TILEXR_MOONEP_PLANNER_HOST_H

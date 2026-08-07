@@ -8,7 +8,7 @@
 #include "planner_common.h"
 #include "tilexr_types.h"
 
-namespace TileXRMoonEp {
+namespace TileXRMoonEpV3 {
 namespace {
 
 bool CheckedAdd(uint64_t lhs, uint64_t rhs, uint64_t *out)
@@ -172,4 +172,4 @@ int TileXRMoonEpBuildPlannerLayout(int64_t rankSize, int64_t s, int64_t k,
     return TileXR::TILEXR_SUCCESS;
 }
 
-} // namespace TileXRMoonEp
+} // namespace TileXRMoonEpV3
