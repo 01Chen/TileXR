@@ -62,7 +62,7 @@ def make_buffer(*, write_status_markers=False, runtime=None):
 
 
 class MoonEPSmokeTests(unittest.TestCase):
-    def test_native_hidden_dtype_is_bfloat16_only(self):
+    def test_native_hidden_dtype_supports_float16_and_bfloat16(self):
         torch = FakeTorch()
         context = TileXRMoonEPContext(
             runtime=FakeRuntime(),
@@ -83,8 +83,8 @@ class MoonEPSmokeTests(unittest.TestCase):
             expert_count=4,
             dtype=torch.float16,
         )
-        with self.assertRaisesRegex(TypeError, "must be bfloat16"):
-            TileXRMoonEPBuffer(context, torch_module=torch)
+        buffer = TileXRMoonEPBuffer(context, torch_module=torch)
+        buffer.close()
 
     def test_oversubscribed_planning_barrier_is_outside_device_work(self):
         buffer = SimpleNamespace(synchronize_calls=0)
@@ -199,7 +199,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "current NPU device"):
             buffer.planning(tensor((4, 2), torch.int32), tpe)
 
-    def test_upstream_dispatch_reuse_flags_events_and_zero_copy_rejection(self):
+    def test_urma_dispatch_reuse_flags_events_and_zero_copy_rejection(self):
         torch, runtime, buffer = make_buffer()
         hidden = tensor((4, 8), torch.bfloat16)
         topk = tensor((4, 2), torch.int32)
@@ -220,7 +220,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertEqual(tuple(cu_seqlens.shape), (6,))
         self.assertEqual(tuple(hidden_nvsh.shape), (8, 8))
         fresh_call = next(call for call in runtime.calls if call[0] == "dispatch")
-        self.assertEqual(fresh_call[-2:], (True, True))
+        self.assertEqual(fresh_call[-2:], (False, True))
 
         planning_count = sum(call[0] == "planning" for call in runtime.calls)
         native_calls = len(runtime.calls)
@@ -249,7 +249,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         hidden = tensor((4, 8), torch.bfloat16)
         buffer.dispatch(hidden, plan=plan)
         first = [call for call in runtime.calls if call[0] == "dispatch"][-1]
-        self.assertEqual(first[-2:], (True, True))
+        self.assertEqual(first[-2:], (False, True))
         buffer.synchronize()
 
         buffer.dispatch(hidden, plan=plan)
@@ -272,7 +272,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         buffer.dispatch(hidden, plan=plan)
 
         dispatch_calls = [call for call in runtime.calls if call[0] == "dispatch"]
-        self.assertEqual([call[-2] for call in dispatch_calls], [True, True])
+        self.assertEqual([call[-2] for call in dispatch_calls], [False, False])
         buffer.synchronize()
         buffer.close()
 
@@ -295,7 +295,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         hidden_nvsh, _, _, _ = buffer.dispatch(
             tensor((4, 8), torch.bfloat16), plan=plan
         )
-        self.assertEqual(plan.status.item(), 2000)
+        self.assertEqual(plan.status.item(), 0)
         buffer.synchronize()
 
         projection = ProjectionBuffers.from_local_weights(
@@ -335,7 +335,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         buffer.synchronize()
         buffer.dispatch(tensor((4, 8), torch.bfloat16), plan=plan)
         plan.status._item = 3000
-        with self.assertRaisesRegex(RuntimeError, "expected 2000"):
+        with self.assertRaisesRegex(RuntimeError, "expected 0"):
             buffer.synchronize()
         buffer.close()
 
@@ -424,6 +424,14 @@ class MoonEPSmokeTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(load_cases(path)[0], BenchmarkCase("smoke", 32, 2, 8, 64))
+            self.assertEqual(
+                load_cases(path)[0].route_distribution,
+                "moonep_combine_balanced",
+            )
+            self.assertEqual(
+                BenchmarkCase("fp16", 1, 1, 1, 1, dtype="float16").dtype,
+                "float16",
+            )
         with self.assertRaisesRegex(ValueError, "unknown benchmark case fields"):
             BenchmarkCase.from_mapping(
                 {"id": "bad", "S": 1, "K": 1, "E": 1, "H": 1, "mystery": 1}
@@ -441,6 +449,8 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertEqual(topology["logical_world_size"], 16)
         self.assertTrue(topology["oversubscribed"])
         self.assertEqual(topology["planner_block_dim"], 32)
+        self.assertEqual(topology["dispatch_aiv_core_count"], 64)
+        self.assertEqual(topology["dispatch_aiv_core_count_source"], "default")
         self.assertEqual([rank_to_device(rank, 8) for rank in range(16)], list(range(8)) * 2)
         native = resolve_topology(
             physical_device_count=8,
@@ -451,6 +461,15 @@ class MoonEPSmokeTests(unittest.TestCase):
         )
         self.assertEqual(native["planner_block_dim"], 64)
         self.assertEqual(native["planner_block_dim_source"], "default_native")
+        configured = resolve_topology(
+            physical_device_count=8,
+            ranks_per_device=1,
+            world_size=8,
+            planner_block_dim=None,
+            environment={"TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT": "32"},
+        )
+        self.assertEqual(configured["dispatch_aiv_core_count"], 32)
+        self.assertEqual(configured["dispatch_aiv_core_count_source"], "environment")
         with self.assertRaisesRegex(ValueError, "world_size=16 <= blockDim <= 64"):
             resolve_topology(
                 physical_device_count=8,
@@ -467,6 +486,15 @@ class MoonEPSmokeTests(unittest.TestCase):
                 planner_block_dim=65,
                 environment={},
             )
+        with self.assertRaisesRegex(ValueError, "1 <= coreCount <= 64"):
+            resolve_topology(
+                physical_device_count=8,
+                ranks_per_device=1,
+                world_size=8,
+                planner_block_dim=None,
+                environment={},
+                dispatch_aiv_core_count=65,
+            )
 
     def test_planner_wait_budget_defaults_to_bounded_native_value(self):
         from tools.moonep.benchmark import build_parser as build_benchmark_parser
@@ -480,6 +508,25 @@ class MoonEPSmokeTests(unittest.TestCase):
         )
         self.assertEqual(benchmark_args.wait_iterations, 1_000_000)
         self.assertEqual(launcher_args.wait_iterations, 1_000_000)
+
+    def test_distributed_launcher_builds_dispatch_hot_loop_command(self):
+        from tools.moonep.distributed_node import build_parser as build_node_parser
+        from tools.moonep.launcher import _process_command
+
+        args = build_node_parser().parse_args([
+            "--cases", "cases.json",
+            "--output-dir", "output",
+            "--install-prefix", "install",
+            "--node-count", "4",
+            "--node-rank", "0",
+            "--benchmark-kind", "dispatch_hot_loop",
+            "--dispatch-modes", "hidden",
+            "--route-distribution", "moonep_combine_balanced",
+        ])
+        command = _process_command(args)
+        self.assertIn("tools.moonep.dispatch_hot_loop", command)
+        self.assertIn("--dispatch-modes", command)
+        self.assertNotIn("--mode", command)
 
     def test_completion_rendezvous_preserves_peer_window_teardown_order(self):
         def run_pair(*, client_quiesced=True, client_passed=True, stale=False):
@@ -789,7 +836,7 @@ class MoonEPSmokeTests(unittest.TestCase):
             all_topk=deterministic_all_topk(1, 8, 2, 8),
         )
         self.assertEqual(reference.dispatched_capacity, 64)
-        self.assertEqual(reference.dst[1], -5)
+        self.assertEqual(reference.dst[1], 4)
         self.assertEqual(len(reference.cu_seqlens), 10)
         self.assertEqual(len(reference.experts_to_copy), 2)
 
@@ -867,6 +914,41 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertFalse(summary["transport_performance_valid"])
         self.assertEqual(summary["performance_scope"], "oversubscribed_functional_only")
         self.assertIn("p50", summary["tokens_per_second"])
+
+    def test_dispatch_hot_loop_report_uses_hidden_kernel_throughput(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case_dir = Path(directory) / "dispatch"
+            rank_dir = case_dir / "rank_0"
+            write_json(rank_dir / "result.json", {
+                "benchmark_kind": "dispatch_hot_loop",
+                "dispatch_modes": ["hidden"],
+                "status": "passed",
+                "rank": 0,
+                "case": {"case_id": "dispatch", "tokens_per_rank": 4},
+                "capabilities": {
+                    "stage_mask": 3,
+                    "stub_mask": 28,
+                    "transport_performance_valid": False,
+                },
+                "topology": {
+                    "physical_device_count": 1,
+                    "ranks_per_device": 1,
+                    "oversubscribed": False,
+                    "peer_memory_cross_node": False,
+                    "dispatch_aiv_core_count": 64,
+                    "dispatch_aiv_core_count_source": "distributed_cli",
+                },
+                "validation": {"passed": True},
+            })
+            write_jsonl(rank_dir / "samples.jsonl", [{
+                "iteration": 0,
+                "timings_us": {"hidden_host": 2.0, "hidden_kernel": 20.0},
+            }])
+            summary = aggregate_rank_artifacts(case_dir, world_size=1)
+        self.assertEqual(summary["performance_scope"], "dispatch_native")
+        self.assertEqual(summary["dispatch_modes"], ["hidden"])
+        self.assertEqual(summary["metrics_us"]["hidden_kernel"]["p95"], 20.0)
+        self.assertEqual(summary["tokens_per_second"]["mean"], 200000.0)
 
 
 if __name__ == "__main__":

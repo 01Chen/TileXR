@@ -4,6 +4,13 @@ from dataclasses import dataclass
 from typing import Sequence
 
 
+DEFAULT_ROUTE_DISTRIBUTION = "moonep_combine_balanced"
+ROUTE_DISTRIBUTIONS = (
+    DEFAULT_ROUTE_DISTRIBUTION,
+    "rank_shifted_uniform",
+)
+
+
 @dataclass(frozen=True)
 class ReferencePlan:
     dispatched_capacity: int
@@ -14,14 +21,75 @@ class ReferencePlan:
     remote_stats: tuple[int, ...]
 
 
-def deterministic_all_topk(
-    rank_size: int, tokens_per_rank: int, topk: int, expert_count: int
+def deterministic_rank_topk(
+    rank: int,
+    rank_size: int,
+    tokens_per_rank: int,
+    topk: int,
+    expert_count: int,
+    route_distribution: str = DEFAULT_ROUTE_DISTRIBUTION,
 ) -> tuple[int, ...]:
+    if (
+        rank_size <= 0
+        or rank < 0
+        or rank >= rank_size
+        or tokens_per_rank <= 0
+        or topk <= 0
+        or expert_count <= 0
+        or topk > expert_count
+        or expert_count % rank_size != 0
+    ):
+        raise ValueError("invalid deterministic route dimensions")
+    if route_distribution not in ROUTE_DISTRIBUTIONS:
+        raise ValueError(f"unknown route distribution: {route_distribution}")
+
     route_count = tokens_per_rank * topk
+    if route_distribution == "rank_shifted_uniform":
+        return tuple(
+            (route + rank * topk) % expert_count for route in range(route_count)
+        )
+
+    if route_count % expert_count != 0:
+        raise ValueError(
+            "moonep_combine_balanced requires S*K divisible by expert_count"
+        )
+    experts_per_rank = expert_count // rank_size
+    target_counts = [0 for _ in range(rank_size)]
+    expert_ids: list[int] = []
+    for token in range(tokens_per_rank):
+        for topk_index in range(topk):
+            target = (rank - (token + topk_index) % rank_size) % rank_size
+            local_expert = target_counts[target] % experts_per_rank
+            expert_ids.append(target * experts_per_rank + local_expert)
+            target_counts[target] += 1
+
+    expected_per_target = route_count // rank_size
+    if any(count != expected_per_target for count in target_counts):
+        raise ValueError(
+            "moonep_combine_balanced requires the combine target formula to "
+            "distribute S*K equally across ranks"
+        )
+    return tuple(expert_ids)
+
+
+def deterministic_all_topk(
+    rank_size: int,
+    tokens_per_rank: int,
+    topk: int,
+    expert_count: int,
+    route_distribution: str = DEFAULT_ROUTE_DISTRIBUTION,
+) -> tuple[int, ...]:
     return tuple(
-        (route + source * topk) % expert_count
+        expert
         for source in range(rank_size)
-        for route in range(route_count)
+        for expert in deterministic_rank_topk(
+            source,
+            rank_size,
+            tokens_per_rank,
+            topk,
+            expert_count,
+            route_distribution,
+        )
     )
 
 
@@ -190,7 +258,6 @@ def build_reference_plan(
     local_counts = [0 for _ in range(expert_count)]
     dst = []
     for token in range(tokens_per_rank):
-        seen_destinations: set[int] = set()
         for topk_index in range(topk):
             route = token * topk + topk_index
             expert = int(all_topk[rank * route_count + route])
@@ -217,9 +284,7 @@ def build_reference_plan(
                 + global_occurrence
                 - previous
             )
-            duplicate = destination in seen_destinations
-            seen_destinations.add(destination)
-            dst.append(-raw - 1 if duplicate else raw)
+            dst.append(raw)
 
     return ReferencePlan(
         dispatched_capacity=dispatched_capacity,

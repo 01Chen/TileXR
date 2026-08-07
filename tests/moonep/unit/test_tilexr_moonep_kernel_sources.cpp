@@ -102,9 +102,9 @@ int main()
         ReadFile("src/moonep/common/moonep_kernel_launch.h");
     const std::string kernelBuild = ReadFile("src/moonep/cmake/MoonEpKernel.cmake");
 
-    Contains("planner host", plannerHost,
+    Excludes("planner host", plannerHost,
         "commArgs->localRankSize != commArgs->rankSize");
-    Contains("planner host", plannerHost,
+    Excludes("planner host", plannerHost,
         "commArgs.localRankSize != commArgs.rankSize");
     Contains("planner kernel", plannerKernel, "TileXR::IPC_DATA_OFFSET");
     Excludes("planner kernel", Lower(plannerKernel), "udma");

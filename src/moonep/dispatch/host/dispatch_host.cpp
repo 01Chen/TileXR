@@ -1,5 +1,7 @@
 #include "dispatch_host.h"
 
+#include <cstddef>
+
 #include "moonep_stage_host.h"
 
 namespace TileXRMoonEp {
@@ -12,7 +14,8 @@ int TileXRMoonEpPrepareDispatchLaunch(const TileXRMoonEpDispatchArgsV1 *args,
     }
     *params = DispatchParams {};
     *context = DispatchLaunchContext {};
-    if (args == nullptr || args->structSize < sizeof(*args) ||
+    if (args == nullptr || args->structSize <
+            offsetof(TileXRMoonEpDispatchArgsV1, registeredWorkspace) ||
         args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 || args->comm == nullptr ||
         args->plan == nullptr || args->hiddenSh == nullptr || args->hiddenNvsh == nullptr ||
         stream == nullptr) {

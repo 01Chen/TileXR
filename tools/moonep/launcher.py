@@ -16,6 +16,7 @@ from .report import aggregate_correctness_artifacts, aggregate_rank_artifacts, w
 
 
 PLANNER_BLOCK_DIM_ENV = "TILEXR_MOONEP_PLANNER_BLOCK_DIM"
+DISPATCH_AIV_CORE_COUNT_ENV = "TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT"
 
 
 def resolve_topology(
@@ -25,6 +26,7 @@ def resolve_topology(
     world_size: int | None,
     planner_block_dim: int | None,
     environment: Mapping[str, str],
+    dispatch_aiv_core_count: int | None = None,
 ) -> dict[str, object]:
     if physical_device_count <= 0:
         raise ValueError("physical_device_count must be positive")
@@ -51,6 +53,19 @@ def resolve_topology(
             f"effective {PLANNER_BLOCK_DIM_ENV}={effective} must satisfy "
             f"world_size={logical_world_size} <= blockDim <= 64"
         )
+    dispatch_source = "default"
+    dispatch_effective = 64
+    if dispatch_aiv_core_count is not None:
+        dispatch_effective = int(dispatch_aiv_core_count)
+        dispatch_source = "cli"
+    elif environment.get(DISPATCH_AIV_CORE_COUNT_ENV):
+        dispatch_effective = int(environment[DISPATCH_AIV_CORE_COUNT_ENV])
+        dispatch_source = "environment"
+    if dispatch_effective < 1 or dispatch_effective > 64:
+        raise ValueError(
+            f"effective {DISPATCH_AIV_CORE_COUNT_ENV}={dispatch_effective} "
+            "must satisfy 1 <= coreCount <= 64"
+        )
     return {
         "logical_world_size": logical_world_size,
         "physical_device_count": physical_device_count,
@@ -58,6 +73,8 @@ def resolve_topology(
         "oversubscribed": logical_world_size > physical_device_count,
         "planner_block_dim": effective,
         "planner_block_dim_source": source,
+        "dispatch_aiv_core_count": dispatch_effective,
+        "dispatch_aiv_core_count_source": dispatch_source,
     }
 
 
@@ -84,6 +101,7 @@ def _append_case_overrides(command: list[str], args: argparse.Namespace) -> None
         "prefetch_slots": "--prefetch-slots",
         "token_padding": "--token-padding",
         "routing_pattern": "--routing-pattern",
+        "route_distribution": "--route-distribution",
         "dtype": "--dtype",
         "seed": "--seed",
         "warmup": "--warmup",
@@ -108,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ranks-per-device", type=int, choices=(1, 2), default=1)
     parser.add_argument("--world-size", type=int, default=None)
     parser.add_argument("--planner-block-dim", type=int, default=None)
+    parser.add_argument("--dispatch-aiv-core-count", type=int, default=None)
     parser.add_argument("--comm-id", default=None)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--wait-iterations", type=int, default=1_000_000)
@@ -126,28 +145,33 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _process_command(args: argparse.Namespace) -> list[str]:
+    dispatch_hot_loop = getattr(args, "benchmark_kind", None) == "dispatch_hot_loop"
     command = [
         args.python,
         "-m",
-        "tools.moonep.benchmark",
+        "tools.moonep.dispatch_hot_loop" if dispatch_hot_loop else "tools.moonep.benchmark",
         "--cases",
         str(Path(args.cases).resolve()),
         "--output-dir",
         str(Path(args.output_dir).resolve()),
         "--wait-iterations",
         str(args.wait_iterations),
-        "--mode",
-        args.mode,
     ]
+    if not dispatch_hot_loop:
+        command.extend(("--mode", args.mode))
     if args.case_ids:
         command.extend(("--case-ids", args.case_ids))
     if args.install_prefix:
         command.extend(("--install-prefix", str(Path(args.install_prefix).resolve())))
-    if args.candidate_backend:
-        command.extend(("--candidate-backend", args.candidate_backend))
-    if args.dump_stage_tensors:
-        command.append("--dump-stage-tensors")
-    command.extend(("--tensor-preview-elements", str(args.tensor_preview_elements)))
+    if dispatch_hot_loop:
+        command.append("--dispatch-modes")
+        command.extend(args.dispatch_modes)
+    else:
+        if args.candidate_backend:
+            command.extend(("--candidate-backend", args.candidate_backend))
+        if args.dump_stage_tensors:
+            command.append("--dump-stage-tensors")
+        command.extend(("--tensor-preview-elements", str(args.tensor_preview_elements)))
     _append_case_overrides(command, args)
     return command
 
@@ -170,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         world_size=args.world_size,
         planner_block_dim=args.planner_block_dim,
         environment=os.environ,
+        dispatch_aiv_core_count=args.dispatch_aiv_core_count,
     )
     world_size = int(topology["logical_world_size"])
     comm_id = args.comm_id or _unused_local_comm_id()
@@ -231,6 +256,12 @@ def main(argv: list[str] | None = None) -> int:
         topology["planner_block_dim_source"]
     )
     base_env[PLANNER_BLOCK_DIM_ENV] = str(topology["planner_block_dim"])
+    base_env[DISPATCH_AIV_CORE_COUNT_ENV] = str(
+        topology["dispatch_aiv_core_count"]
+    )
+    base_env["TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT_SOURCE"] = str(
+        topology["dispatch_aiv_core_count_source"]
+    )
 
     command = _process_command(args)
     processes: list[tuple[int, subprocess.Popen, object]] = []

@@ -10,6 +10,9 @@
 #ifndef TILEXR_SOCK_EXCHANGE_H
 #define TILEXR_SOCK_EXCHANGE_H
 
+#include <cerrno>
+#include <cstdint>
+#include <cstring>
 #include <vector>
 #include <string>
 #include <memory>
@@ -95,34 +98,54 @@ private:
         return ((ioErrno == EAGAIN) || (ioErrno == EWOULDBLOCK) || (ioErrno == EINTR));
     }
 
-    template <typename T> int Send(int fd, const T *sendBuf, size_t sendSize, int flag) const
+    template <typename T> ssize_t Send(int fd, const T *sendBuf, size_t sendSize, int flag) const
     {
-        do {
-            auto ret = send(fd, sendBuf, sendSize, flag);
+        const auto* bytes = reinterpret_cast<const uint8_t*>(sendBuf);
+        size_t sent = 0;
+        int sendFlags = flag;
+#ifdef MSG_NOSIGNAL
+        sendFlags |= MSG_NOSIGNAL;
+#endif
+        while (sent < sendSize) {
+            const ssize_t ret = send(fd, bytes + sent, sendSize - sent, sendFlags);
             if (ret < 0) {
                 if (CheckErrno(errno)) {
-                    TILEXR_LOG(ERROR) << "send failed: " << strerror(errno);
                     continue;
                 }
-                TILEXR_LOG(DEBUG) << "Send failed: " << strerror(errno);
+                TILEXR_LOG(ERROR) << "Send failed after " << sent << "/" << sendSize
+                                  << " bytes: " << strerror(errno);
+                return -1;
             }
-            return ret;
-        } while (true);
+            if (ret == 0) {
+                TILEXR_LOG(ERROR) << "Send returned zero after " << sent << "/" << sendSize << " bytes";
+                return -1;
+            }
+            sent += static_cast<size_t>(ret);
+        }
+        return static_cast<ssize_t>(sent);
     }
 
-    template <typename T> int Recv(int fd, T *recvBuf, size_t recvSize, int flag) const
+    template <typename T> ssize_t Recv(int fd, T *recvBuf, size_t recvSize, int flag) const
     {
-        do {
-            auto ret = recv(fd, recvBuf, recvSize, flag);
+        auto* bytes = reinterpret_cast<uint8_t*>(recvBuf);
+        size_t received = 0;
+        while (received < recvSize) {
+            const ssize_t ret = recv(fd, bytes + received, recvSize - received, flag);
             if (ret < 0) {
                 if (CheckErrno(errno)) {
-                    TILEXR_LOG(ERROR) << "recv failed: " << strerror(errno);
                     continue;
                 }
-                TILEXR_LOG(DEBUG) << "recv failed: " << strerror(errno);
+                TILEXR_LOG(ERROR) << "Recv failed after " << received << "/" << recvSize
+                                  << " bytes: " << strerror(errno);
+                return -1;
             }
-            return ret;
-        } while (true);
+            if (ret == 0) {
+                TILEXR_LOG(ERROR) << "Recv reached EOF after " << received << "/" << recvSize << " bytes";
+                return -1;
+            }
+            received += static_cast<size_t>(ret);
+        }
+        return static_cast<ssize_t>(received);
     }
 
     template <typename T> int ClientSendRecv(const T *sendBuf, size_t sendSize, T *recvBuf)

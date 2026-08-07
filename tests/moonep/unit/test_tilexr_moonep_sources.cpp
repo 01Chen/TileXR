@@ -77,6 +77,10 @@ int main()
     const std::string host = ReadFile("src/moonep/host/tilexr_moonep.cpp");
     const std::string cmake = ReadFile("src/moonep/CMakeLists.txt");
     const std::string dispatchCmake = ReadFile("src/moonep/dispatch/CMakeLists.txt");
+    const std::string dispatchUrmaHost =
+        ReadFile("src/moonep/dispatch/urma/host/dispatch_host.cpp");
+    const std::string dispatchUrmaKernel =
+        ReadFile("src/moonep/dispatch/urma/kernels/tilexr_moonep_dispatch_kernel.cpp");
     const std::string combineCmake = ReadFile("src/moonep/combine/CMakeLists.txt");
     const std::string prefetchCmake = ReadFile("src/moonep/prefetch_weight/CMakeLists.txt");
     const std::string reduceCmake = ReadFile("src/moonep/reduce_grad/CMakeLists.txt");
@@ -97,6 +101,8 @@ int main()
     Contains("public header", header, "extern \"C\"");
     Contains("public header", header, "TileXRMoonEpTensorV1");
     Contains("public header", header, "TileXRMoonEpPlanV1");
+    Contains("public header", header, "registeredWorkspace");
+    Contains("public header", header, "TileXRMoonEpDispatchGetWorkspaceSizeV1");
     Excludes("public header", header, "tilexr_api.h");
     Excludes("public header", header, "std::");
 
@@ -106,6 +112,7 @@ int main()
     Contains("host", host, "zeroFillRanges");
     Contains("host", host, "dupCounts");
     Contains("host", host, "TileXRMoonEpRunDispatchV1");
+    Contains("host", host, "TileXRMoonEpRunDispatchUrmaV1");
     Contains("host", host, "TileXRMoonEpRunCombineV1");
     Excludes("host dispatch stub", host,
         "RunLocalStub(args, stream, StubStage::Dispatch)");
@@ -137,9 +144,22 @@ int main()
     Contains("dispatch CMake", dispatchCmake, "moonep_kernel_registration.cpp");
     Excludes("dispatch CMake", dispatchCmake, "libtilexr_moonep_dispatch_kernel.so");
     Contains("dispatch CMake", dispatchCmake, "--cce-aicore-arch=dav-c310-vec");
+    Contains("dispatch CMake", dispatchCmake, "tilexr_moonep_dispatch_urma_kernel");
+    Contains("dispatch CMake", dispatchCmake, "--cce-auto-sync");
+    Contains("dispatch CMake", dispatchCmake, "-DCATLASS_ARCH=3510");
+    Contains("dispatch CMake", dispatchCmake, "TILEXR_MOONEP_DISPATCH_ENABLE_DFX");
     Contains("dispatch CMake", dispatchCmake, "cxx_std_14");
     Contains("dispatch CMake", dispatchCmake, "BUILD_WITH_INSTALL_RPATH TRUE");
     Contains("dispatch CMake", dispatchCmake, "INSTALL_RPATH \"$ORIGIN\"");
+    Contains("URMA dispatch Host", dispatchUrmaHost,
+        "TileXRMoonEpBuildDispatchUrmaLayout");
+    Contains("URMA dispatch Host", dispatchUrmaHost, "registeredWorkspaceBytes");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "tilexr_moonep_dispatch_urma_kernel");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel, "destinationCapacityArg");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel, "udmaIssueQp0Buf");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel, "udmaIssueQp1Buf");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel, "<<<");
     Contains("combine CMake", combineCmake, "add_library(tilexr-moonep-combine SHARED");
     Contains("combine CMake", combineCmake, "TILEXR_MOONEP_COMBINE_KERNEL_EMBED_CPP");
     Contains("combine CMake", combineCmake, "moonep_kernel_registration.cpp");

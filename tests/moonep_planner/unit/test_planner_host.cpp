@@ -61,7 +61,7 @@ TileXRMoonEp::PlannerParams MakeParams(TileXRCommPtr comm, uint64_t workspaceByt
     return params;
 }
 
-void TestSameNodeOnlyValidation()
+void TestSameAndCrossNodeValidation()
 {
     const TileXRCommPtr comm = reinterpret_cast<TileXRCommPtr>(0x1);
     TileXRMoonEp::PlannerLayout layout {};
@@ -74,7 +74,12 @@ void TestSameNodeOnlyValidation()
     TileXR::CommArgs crossNode = MakeCommArgs(16, 9, 8, 1);
     gHostArgs = &crossNode;
     Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, 4, 4, &layout) ==
-        TileXR::TILEXR_ERROR_NOT_SUPPORT, "cross-node Planner layout accepted");
+        TileXR::TILEXR_SUCCESS, "cross-node peer-window Planner layout rejected");
+    Check(layout.blockDim == 64, "cross-node default blockDim mismatch");
+
+    crossNode.peerMems[12] = nullptr;
+    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, 4, 4, &layout) ==
+        TileXR::TILEXR_ERROR_NOT_INITIALIZED, "missing remote peer window accepted");
 
     crossNode = MakeCommArgs(16, 9, 8, 8);
     gHostArgs = &crossNode;
@@ -144,9 +149,9 @@ void TestPrepareLaunchContext()
     gDeviceArgs = reinterpret_cast<GM_ADDR>(0xa000);
     TileXRMoonEp::PlannerLaunchContext context {};
     Check(TileXRMoonEp::TileXRMoonEpPrepareLaunchContext(params, &context) ==
-        TileXR::TILEXR_ERROR_NOT_SUPPORT, "cross-node launch context accepted");
-    Check(context.hostArgs == nullptr && context.devArgs == nullptr,
-        "failed cross-node launch retained CommArgs");
+        TileXR::TILEXR_SUCCESS, "cross-node launch context rejected");
+    Check(context.hostArgs == &args && context.devArgs == gDeviceArgs,
+        "launch context did not preserve CommArgs");
 }
 
 } // namespace
@@ -171,7 +176,7 @@ int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgsPtr)
 
 int main()
 {
-    TestSameNodeOnlyValidation();
+    TestSameAndCrossNodeValidation();
     TestLaunchParameterValidation();
     TestPrepareLaunchContext();
     return failures == 0 ? 0 : 1;

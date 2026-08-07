@@ -122,7 +122,7 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
         self.assertIs(call[3], first.hidden)
         self.assertIs(call[4], weights)
         self.assertIs(call[5], first.route_weights)
-        self.assertEqual(call[-2:], (True, True))
+        self.assertEqual(call[-2:], (False, True))
         self.assertIs(first.plan, plan)
         self.assertIs(plan.dedup.groups, native.dup_groups)
         self.assertIs(plan.dedup.loffs, native.dup_loffs)
@@ -222,7 +222,7 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
         backend.dispatch(plan, tensor((4, 4), torch.bfloat16))
         native = backend._native_plans[id(plan)].native
         native.status._item = 3000
-        with self.assertRaisesRegex(RuntimeError, "expected 2000"):
+        with self.assertRaisesRegex(RuntimeError, "expected 0"):
             backend.synchronize()
         backend.close()
 

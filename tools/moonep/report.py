@@ -49,6 +49,7 @@ def _metric_summary(values: list[float]) -> dict[str, float]:
         "max": max(values),
         "mean": sum(values) / len(values),
         "p50": percentile(values, 0.50),
+        "p95": percentile(values, 0.95),
         "p90": percentile(values, 0.90),
         "p99": percentile(values, 0.99),
     }
@@ -89,6 +90,8 @@ def aggregate_rank_artifacts(
         "oversubscribed",
         "planner_block_dim",
         "planner_block_dim_source",
+        "dispatch_aiv_core_count",
+        "dispatch_aiv_core_count_source",
         "peer_memory_cross_node",
         "cross_node_validated",
     )
@@ -96,6 +99,12 @@ def aggregate_rank_artifacts(
         key: reference["topology"].get(key) for key in topology_keys
     }
     for rank, result in enumerate(rank_results[1:], start=1):
+        if result.get("benchmark_kind", "flow") != reference.get(
+            "benchmark_kind", "flow"
+        ):
+            raise ValueError(f"rank {rank} benchmark kind differs from rank 0")
+        if result.get("dispatch_modes") != reference.get("dispatch_modes"):
+            raise ValueError(f"rank {rank} Dispatch modes differ from rank 0")
         if result["case"] != reference["case"]:
             raise ValueError(f"rank {rank} case metadata differs from rank 0")
         if result["capabilities"] != reference["capabilities"]:
@@ -134,6 +143,20 @@ def aggregate_rank_artifacts(
     }
     first = reference
     capabilities = first["capabilities"]
+    dispatch_only = first.get("benchmark_kind") == "dispatch_hot_loop"
+    dispatch_modes = tuple(first.get(
+        "dispatch_modes", ("hidden", "weight", "pair")))
+    if dispatch_only:
+        if not dispatch_modes or len(set(dispatch_modes)) != len(dispatch_modes):
+            raise ValueError("Dispatch modes must be non-empty and contain no duplicates")
+        required_dispatch_metrics = {
+            f"{mode}_{kind}" for mode in dispatch_modes for kind in ("host", "kernel")
+        }
+        missing = required_dispatch_metrics - metric_names
+        if missing:
+            raise ValueError(
+                f"dispatch hot-loop samples are missing timing metrics: {sorted(missing)}"
+            )
     transport_correctness_valid = bool(
         capabilities.get("transport_correctness_valid", False)
     )
@@ -144,8 +167,12 @@ def aggregate_rank_artifacts(
     cross_node_validated = bool(
         first["topology"].get("cross_node_validated", False)
     )
+    native_mask_valid = (
+        (int(capabilities["stage_mask"]) & 3) == 3
+        and (int(capabilities["stub_mask"]) & 3) == 0
+    ) if dispatch_only else bool(capabilities["transport_performance_valid"])
     transport_performance_valid = bool(
-        capabilities["transport_performance_valid"]
+        native_mask_valid
         and not oversubscribed
         and (not peer_memory_cross_node or cross_node_validated)
     )
@@ -154,49 +181,67 @@ def aggregate_rank_artifacts(
     elif peer_memory_cross_node and not cross_node_validated:
         performance_scope = "cross_node_functional_unvalidated"
     elif transport_performance_valid:
-        performance_scope = "transport"
+        performance_scope = "dispatch_native" if dispatch_only else "transport"
     elif transport_correctness_valid:
         performance_scope = "native_correctness_only"
     else:
         performance_scope = "stub_contract_only"
+    validation_mode = (
+        "planner_and_dispatch_bit_exact" if dispatch_only else
+        ("full" if transport_performance_valid else performance_scope)
+    )
     summary = {
         "schema_version": 1,
+        "benchmark_kind": first.get("benchmark_kind", "flow"),
         "status": "passed",
         "case": first["case"],
+        "dispatch_modes": list(dispatch_modes) if dispatch_only else None,
         "logical_world_size": world_size,
         "physical_device_count": first["topology"]["physical_device_count"],
         "ranks_per_device": first["topology"]["ranks_per_device"],
         "oversubscribed": oversubscribed,
         "planner_block_dim": first["topology"].get("planner_block_dim"),
         "planner_block_dim_source": first["topology"].get("planner_block_dim_source"),
+        "dispatch_aiv_core_count": first["topology"].get("dispatch_aiv_core_count"),
+        "dispatch_aiv_core_count_source": first["topology"].get(
+            "dispatch_aiv_core_count_source"),
         "capabilities": capabilities,
         "transport_correctness_valid": transport_correctness_valid,
         "transport_performance_valid": transport_performance_valid,
         "performance_scope": performance_scope,
         "validation": {
             "passed": all(bool(item["validation"]["passed"]) for item in rank_results),
-            "mode": (
-                "full" if transport_performance_valid else performance_scope
-            ),
+            "mode": validation_mode,
         },
         "cross_rank_max_samples": maxima,
         "metrics_us": metrics,
     }
     tokens_per_rank = int(first["case"]["tokens_per_rank"])
-    throughput = []
-    for sample in maxima:
-        duration = float(sample["timings_us"]["end_to_end"])
-        throughput.append(
-            tokens_per_rank * world_size * 1_000_000.0 / duration
-            if duration > 0.0
-            else 0.0
-        )
-    summary["tokens_per_second"] = _metric_summary(throughput)
+    throughput_metrics = ({mode: f"{mode}_kernel" for mode in dispatch_modes}
+        if dispatch_only else {"end_to_end": "end_to_end"})
+    throughput_by_mode = {}
+    for mode, metric_name in throughput_metrics.items():
+        throughput = []
+        for sample in maxima:
+            duration = float(sample["timings_us"][metric_name])
+            throughput.append(
+                tokens_per_rank * world_size * 1_000_000.0 / duration
+                if duration > 0.0
+                else 0.0
+            )
+        throughput_by_mode[mode] = _metric_summary(throughput)
+    summary["tokens_per_second"] = (
+        throughput_by_mode["pair" if "pair" in dispatch_modes else dispatch_modes[0]]
+        if dispatch_only else
+        throughput_by_mode["end_to_end"]
+    )
+    if dispatch_only:
+        summary["tokens_per_second_by_mode"] = throughput_by_mode
     write_json(root / "summary.json", summary)
     with (root / "summary.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=("metric", "min", "max", "mean", "p50", "p90", "p99"),
+            fieldnames=("metric", "min", "max", "mean", "p50", "p95", "p90", "p99"),
         )
         writer.writeheader()
         for name, values in metrics.items():

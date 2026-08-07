@@ -94,6 +94,8 @@ typedef struct TileXRMoonEpDispatchArgsV1 {
     TileXRMoonEpTensorV1 *hiddenNvsh;
     TileXRMoonEpTensorV1 *routeWeightsNvs;
     uint64_t flags;
+    void *registeredWorkspace;
+    uint64_t registeredWorkspaceBytes;
 } TileXRMoonEpDispatchArgsV1;
 
 typedef struct TileXRMoonEpPrefetchWeightArgsV1 {
@@ -141,6 +143,10 @@ int TileXRMoonEpPlanningGetWorkspaceSizeV1(TileXRCommPtr comm, int64_t s, int64_
     int64_t e, int64_t b, int64_t tokenPadding, uint64_t *workspaceBytes, int64_t *nvS);
 
 int TileXRMoonEpPlanningV1(const TileXRMoonEpPlanningArgsV1 *args, aclrtStream stream);
+
+int TileXRMoonEpDispatchGetWorkspaceSizeV1(TileXRCommPtr comm, int64_t s,
+    int64_t k, int64_t h, uint32_t hiddenDtype, uint64_t *workspaceBytes,
+    uint64_t *workspaceAlignment);
 
 int TileXRMoonEpDispatchV1(const TileXRMoonEpDispatchArgsV1 *args, aclrtStream stream);
 

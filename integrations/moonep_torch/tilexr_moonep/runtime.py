@@ -19,6 +19,7 @@ from .abi import (
     TileXRMoonEPReduceGradArgsV1,
     TileXRMoonEPStage,
     TileXRMoonEPTensorV1,
+    dtype_code,
     initialize_struct,
     make_tensor_v1,
     tensor_nbytes,
@@ -216,6 +217,16 @@ class TileXRMoonEPRuntime:
             ctypes.POINTER(ctypes.c_int64),
         ]
         self._moonep_lib.TileXRMoonEpPlanningGetWorkspaceSizeV1.restype = ctypes.c_int
+        self._moonep_lib.TileXRMoonEpDispatchGetWorkspaceSizeV1.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_uint64),
+        ]
+        self._moonep_lib.TileXRMoonEpDispatchGetWorkspaceSizeV1.restype = ctypes.c_int
         symbols = (
             ("TileXRMoonEpPlanningV1", TileXRMoonEPPlanningArgsV1),
             ("TileXRMoonEpDispatchV1", TileXRMoonEPDispatchArgsV1),
@@ -295,6 +306,46 @@ class TileXRMoonEPRuntime:
             )
         return int(workspace_bytes.value)
 
+    def dispatch_workspace_size(self, context) -> tuple[int, int]:
+        workspace_bytes = ctypes.c_uint64()
+        workspace_alignment = ctypes.c_uint64()
+        # The V1 query has no NvS argument. Rounding NvS to complete top-k rows
+        # produces a conservative layout when token padding makes NvS > S*K.
+        query_s = max(
+            int(context.tokens_per_rank),
+            (int(context.nv_s) + int(context.topk) - 1) // int(context.topk),
+        )
+        ret = self._moonep_lib.TileXRMoonEpDispatchGetWorkspaceSizeV1(
+            void_p(self.comm_ptr),
+            ctypes.c_int64(query_s),
+            ctypes.c_int64(context.topk),
+            ctypes.c_int64(context.hidden_size),
+            ctypes.c_uint32(dtype_code(context.dtype)),
+            ctypes.byref(workspace_bytes),
+            ctypes.byref(workspace_alignment),
+        )
+        self._check("TileXRMoonEpDispatchGetWorkspaceSizeV1", ret)
+        return int(workspace_bytes.value), int(workspace_alignment.value)
+
+    def register_dispatch_workspace(self, pointer: int, size: int) -> int | None:
+        if self.world_size == 1:
+            return None
+        handle = ctypes.c_uint32()
+        ret = self._comm_lib.TileXRUDMARegister(
+            void_p(self.comm_ptr), void_p(pointer), ctypes.c_size_t(size),
+            ctypes.byref(handle)
+        )
+        self._check("TileXRUDMARegister", ret)
+        return int(handle.value)
+
+    def unregister_dispatch_workspace(self, handle: int | None) -> None:
+        if handle is None:
+            return
+        ret = self._comm_lib.TileXRUDMAUnregister(
+            void_p(self.comm_ptr), ctypes.c_uint32(handle)
+        )
+        self._check("TileXRUDMAUnregister", ret)
+
     def planning(
         self,
         context,
@@ -334,8 +385,10 @@ class TileXRMoonEPRuntime:
         route_weights=None,
         output_route_weights=None,
         *,
-        build_dedup: bool,
-        inter_rank_sync: bool,
+        build_dedup: bool = False,
+        inter_rank_sync: bool = True,
+        registered_workspace: int | None = None,
+        registered_workspace_bytes: int = 0,
     ) -> None:
         if not inter_rank_sync:
             raise NotImplementedError(
@@ -345,6 +398,10 @@ class TileXRMoonEPRuntime:
         if (route_weights is None) != (output_route_weights is None):
             raise ValueError(
                 "route_weights and output_route_weights must both be provided or both be None"
+            )
+        if (registered_workspace is None) != (registered_workspace_bytes == 0):
+            raise ValueError(
+                "registered_workspace and registered_workspace_bytes must be provided together"
             )
         plan_v1 = self._plan_v1(context, plan)
         hidden_sh = make_tensor_v1(input_tensor)
@@ -364,9 +421,11 @@ class TileXRMoonEPRuntime:
         )
         args.flags = (
             TILEXR_MOONEP_FLAG_BUILD_DEDUP
-            if build_dedup
+            if build_dedup and registered_workspace is None
             else TILEXR_MOONEP_FLAG_NONE
         )
+        args.registeredWorkspace = void_p(registered_workspace)
+        args.registeredWorkspaceBytes = int(registered_workspace_bytes)
         ret = self._moonep_lib.TileXRMoonEpDispatchV1(
             ctypes.byref(args), void_p(stream_ptr)
         )

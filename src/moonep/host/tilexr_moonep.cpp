@@ -1,5 +1,6 @@
 #include "tilexr_moonep.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 
@@ -9,6 +10,11 @@
 namespace TileXRMoonEp {
 
 int TileXRMoonEpRunDispatchV1(
+    const TileXRMoonEpDispatchArgsV1 *args, aclrtStream stream);
+int TileXRMoonEpQueryDispatchUrmaWorkspace(TileXRCommPtr comm, int64_t s,
+    int64_t k, int64_t h, uint32_t hiddenDtype, uint64_t *workspaceBytes,
+    uint64_t *workspaceAlignment);
+int TileXRMoonEpRunDispatchUrmaV1(
     const TileXRMoonEpDispatchArgsV1 *args, aclrtStream stream);
 int TileXRMoonEpRunCombineV1(
     const TileXRMoonEpCombineArgsV1 *args, aclrtStream stream);
@@ -208,7 +214,25 @@ extern "C" int TileXRMoonEpPlanningV1(const TileXRMoonEpPlanningArgsV1 *args,
 extern "C" int TileXRMoonEpDispatchV1(const TileXRMoonEpDispatchArgsV1 *args,
     aclrtStream stream)
 {
+    const std::size_t baseArgsBytes = offsetof(
+        TileXRMoonEpDispatchArgsV1, registeredWorkspace);
+    if (args != nullptr && args->structSize >= sizeof(*args) &&
+        (args->registeredWorkspace != nullptr ||
+            args->registeredWorkspaceBytes != 0)) {
+        return TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV1(args, stream);
+    }
+    if (args != nullptr && args->structSize < baseArgsBytes) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
     return TileXRMoonEp::TileXRMoonEpRunDispatchV1(args, stream);
+}
+
+extern "C" int TileXRMoonEpDispatchGetWorkspaceSizeV1(TileXRCommPtr comm,
+    int64_t s, int64_t k, int64_t h, uint32_t hiddenDtype,
+    uint64_t *workspaceBytes, uint64_t *workspaceAlignment)
+{
+    return TileXRMoonEp::TileXRMoonEpQueryDispatchUrmaWorkspace(
+        comm, s, k, h, hiddenDtype, workspaceBytes, workspaceAlignment);
 }
 
 extern "C" int TileXRMoonEpPrefetchWeightV1(

@@ -134,6 +134,24 @@ target_include_directories(test_tilexr_moonep_stage_reference PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/reference
 )
 
+add_executable(test_tilexr_moonep_dispatch_urma_layout
+    unit/test_tilexr_moonep_dispatch_layout.cpp
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/host/dispatch_layout.cpp
+)
+target_include_directories(test_tilexr_moonep_dispatch_urma_layout PRIVATE
+    ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/common
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/host
+)
+
+add_executable(test_tilexr_moonep_dispatch_urma_schedule
+    unit/test_tilexr_moonep_dispatch_schedule.cpp
+)
+target_include_directories(test_tilexr_moonep_dispatch_urma_schedule PRIVATE
+    ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/common
+)
+
 add_executable(test_tilexr_moonep_dispatch_host
     unit/test_tilexr_moonep_dispatch_host.cpp
     ${TILEXR_ROOT}/src/moonep/dispatch/host/dispatch_layout.cpp
@@ -191,6 +209,10 @@ add_test(NAME test_tilexr_moonep_sources COMMAND test_tilexr_moonep_sources)
 add_test(NAME test_tilexr_moonep_kernel_sources COMMAND test_tilexr_moonep_kernel_sources)
 add_test(NAME test_tilexr_moonep_stage_layout COMMAND test_tilexr_moonep_stage_layout)
 add_test(NAME test_tilexr_moonep_stage_reference COMMAND test_tilexr_moonep_stage_reference)
+add_test(NAME test_tilexr_moonep_dispatch_urma_layout
+    COMMAND test_tilexr_moonep_dispatch_urma_layout)
+add_test(NAME test_tilexr_moonep_dispatch_urma_schedule
+    COMMAND test_tilexr_moonep_dispatch_urma_schedule)
 add_test(NAME test_tilexr_moonep_dispatch_host COMMAND test_tilexr_moonep_dispatch_host)
 add_test(NAME test_tilexr_moonep_combine_host COMMAND test_tilexr_moonep_combine_host)
 add_test(NAME test_tilexr_moonep_prefetch_weight_host COMMAND test_tilexr_moonep_prefetch_weight_host)
