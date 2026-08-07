@@ -102,6 +102,24 @@ void TestCommInitChecksDeviceCommArgsSync()
     CheckContains(path, text, "ret = InitMem();");
 }
 
+void TestDedicatedCreditIpcLifecycle()
+{
+    const std::string cppPath = "src/comm/tilexr_comm.cpp";
+    const std::string headerPath = "src/include/comm_args.h";
+    const auto cppText = ReadFile(cppPath);
+    const auto headerText = ReadFile(headerPath);
+
+    CheckContains(headerPath, headerText,
+        "GM_ADDR creditMems[TILEXR_MAX_RANK_SIZE]");
+    CheckContains(headerPath, headerText, "CREDIT_IPC_BYTES");
+    CheckContains(cppPath, cppText, "TILEXR_ENABLE_CREDIT_IPC");
+    CheckContains(cppPath, cppText, "InitCreditIpcMem(pids, sdids)");
+    CheckContains(cppPath, cppText, "rtIpcOpenMemory(");
+    CheckContains(cppPath, cppText, "CloseCreditIpcMem();");
+    CheckContains(cppPath, cppText,
+        "FreePeerMem(creditIpcMem_[rank_]);");
+}
+
 void TestCWrappersDoNotPublishFailedCommunicators()
 {
     const std::string path = "src/comm/comm_wrap.cpp";
@@ -139,6 +157,9 @@ void TestSocketExchangeUsesDirectConnectionsOnly()
     CheckContains(cppPath, cppText, "return Connect();");
     CheckContains(cppPath, cppText, "bool envProvided = false;");
     CheckContains(cppPath, cppText, "if (!envProvided) {");
+    CheckContains(headerPath, headerText, "while (sent < sendSize)");
+    CheckContains(headerPath, headerText, "while (received < recvSize)");
+    CheckContains(headerPath, headerText, "sendFlags |= MSG_NOSIGNAL");
     CheckNotContains(cppPath, cppText,
                      "handle->addr.sin.sin_port = htons(TILEXR_DEFAULT_SOCK_PORT + dev + commDomain);");
 }
@@ -216,6 +237,7 @@ int main()
 {
     TestOpenSourceTarballsAreNotTracked();
     TestCommInitChecksDeviceCommArgsSync();
+    TestDedicatedCreditIpcLifecycle();
     TestCWrappersDoNotPublishFailedCommunicators();
     TestDumpInitCleansFailedAllocations();
     TestSocketExchangeUsesDirectConnectionsOnly();

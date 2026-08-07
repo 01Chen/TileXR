@@ -7,8 +7,9 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from .planner_reference import DEFAULT_ROUTE_DISTRIBUTION, ROUTE_DISTRIBUTIONS
 
-_DTYPES = {"bfloat16"}
+_DTYPES = {"bfloat16", "float16"}
 _ROUTING_PATTERNS = {
     "balanced",
     "skewed",
@@ -34,6 +35,7 @@ class BenchmarkCase:
     prefetch_slots: int | None = None
     token_padding: int = 1
     routing_pattern: str = "balanced"
+    route_distribution: str = DEFAULT_ROUTE_DISTRIBUTION
 
     def __post_init__(self) -> None:
         if (
@@ -62,6 +64,11 @@ class BenchmarkCase:
         if self.routing_pattern not in _ROUTING_PATTERNS:
             raise ValueError(
                 f"routing_pattern must be one of {sorted(_ROUTING_PATTERNS)}"
+            )
+        if self.route_distribution not in ROUTE_DISTRIBUTIONS:
+            raise ValueError(
+                "route_distribution must be one of "
+                f"{sorted(ROUTE_DISTRIBUTIONS)}, got {self.route_distribution}"
             )
 
     @classmethod
@@ -127,6 +134,7 @@ def apply_overrides(case: BenchmarkCase, args: argparse.Namespace) -> BenchmarkC
         "prefetch_slots",
         "token_padding",
         "routing_pattern",
+        "route_distribution",
         "dtype",
         "seed",
         "warmup",
@@ -151,6 +159,9 @@ def build_case_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--token-padding", type=int, default=None)
     parser.add_argument(
         "--routing-pattern", choices=sorted(_ROUTING_PATTERNS), default=None
+    )
+    parser.add_argument(
+        "--route-distribution", choices=sorted(ROUTE_DISTRIBUTIONS), default=None
     )
     parser.add_argument("--dtype", choices=sorted(_DTYPES), default=None)
     parser.add_argument("--seed", type=int, default=None)

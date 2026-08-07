@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .runtime import TileXRMoonEPRuntime
 
 
-_DISPATCH_STATUS_SUCCESS = 2000
 _COMBINE_STATUS_SUCCESS = 3000
 _PREFETCH_WEIGHT_STATUS_SUCCESS = 4000
 _REDUCE_GRAD_STATUS_SUCCESS = 5000
@@ -238,6 +237,15 @@ class TileXRMoonEPContext:
     dtype: Any
     token_padding: int = 1
     prefetch_slots: int | None = None
+    _dispatch_workspace_owner: Any = field(init=False, default=None, repr=False)
+    _dispatch_workspace_ptr: int = field(init=False, default=0, repr=False)
+    _dispatch_workspace_bytes: int = field(init=False, default=0, repr=False)
+    _dispatch_workspace_alignment: int = field(init=False, default=0, repr=False)
+    _dispatch_workspace_handle: int | None = field(init=False, default=None, repr=False)
+    _buffer_owner: Any = field(init=False, default=None, repr=False)
+    _bound_stream_ptr: int | None = field(init=False, default=None, repr=False)
+    _poisoned: bool = field(init=False, default=False, repr=False)
+    _closed: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.planner_group_size <= 0 or self.planner_group_size > 128:
@@ -347,7 +355,83 @@ class TileXRMoonEPContext:
         )
 
     def close(self) -> None:
+        if self._closed:
+            return
+        if self._buffer_owner is not None:
+            raise RuntimeError("close the owning MoonEP Buffer before closing its context")
+        self.runtime.unregister_dispatch_workspace(self._dispatch_workspace_handle)
+        self._dispatch_workspace_handle = None
+        self._dispatch_workspace_ptr = 0
+        self._dispatch_workspace_bytes = 0
+        self._dispatch_workspace_owner = None
         self.runtime.close()
+        self._closed = True
+
+    def attach_buffer(self, owner: Any) -> None:
+        if self._closed or self._poisoned:
+            raise RuntimeError("MoonEP context is not reusable")
+        if self._buffer_owner is not None and self._buffer_owner is not owner:
+            raise RuntimeError(
+                "one MoonEP communicator/workspace can be owned by only one Buffer"
+            )
+        self._buffer_owner = owner
+
+    def detach_buffer(self, owner: Any) -> None:
+        if self._buffer_owner is owner:
+            self._buffer_owner = None
+            self._bound_stream_ptr = None
+
+    def bind_stream(self, owner: Any, stream_ptr: int) -> None:
+        if self._poisoned:
+            raise RuntimeError("MoonEP context is poisoned and cannot launch more work")
+        if self._buffer_owner is not owner:
+            raise RuntimeError("Buffer does not own the MoonEP context workspace")
+        if self._bound_stream_ptr is None:
+            self._bound_stream_ptr = int(stream_ptr)
+        elif self._bound_stream_ptr != int(stream_ptr):
+            raise RuntimeError(
+                "MoonEP communicator/workspace is bound to one ordered NPU stream; "
+                "quiesce before changing streams"
+            )
+
+    def release_stream(self, owner: Any) -> None:
+        if self._buffer_owner is owner:
+            self._bound_stream_ptr = None
+
+    def ensure_dispatch_workspace(self, torch_module) -> None:
+        if self._dispatch_workspace_owner is not None:
+            return
+        workspace_bytes, alignment = self.runtime.dispatch_workspace_size(self)
+        if workspace_bytes <= 0 or alignment <= 0 or workspace_bytes % alignment != 0:
+            raise RuntimeError(
+                "native Dispatch returned invalid workspace contract "
+                f"bytes={workspace_bytes} alignment={alignment}"
+            )
+        raw = torch_module.empty(
+            (workspace_bytes + alignment - 1,),
+            dtype=torch_module.uint8,
+            device=f"npu:{self.device_index}",
+        )
+        raw.zero_()
+        raw_ptr = int(raw.data_ptr())
+        aligned_ptr = ((raw_ptr + alignment - 1) // alignment) * alignment
+        if aligned_ptr + workspace_bytes > raw_ptr + int(raw.numel()):
+            raise RuntimeError("aligned Dispatch workspace exceeds its raw allocation")
+        handle = self.runtime.register_dispatch_workspace(aligned_ptr, workspace_bytes)
+        self._dispatch_workspace_owner = raw
+        self._dispatch_workspace_ptr = aligned_ptr
+        self._dispatch_workspace_bytes = workspace_bytes
+        self._dispatch_workspace_alignment = alignment
+        self._dispatch_workspace_handle = handle
+
+    @property
+    def dispatch_workspace(self) -> tuple[int, int]:
+        if self._dispatch_workspace_owner is None:
+            raise RuntimeError("Dispatch workspace is not initialized")
+        return self._dispatch_workspace_ptr, self._dispatch_workspace_bytes
+
+    def mark_poisoned(self) -> None:
+        self._poisoned = True
 
 
 class TileXRMoonEPBuffer:
@@ -375,12 +459,23 @@ class TileXRMoonEPBuffer:
         self._plans_needing_dedup: dict[int, MoonEPPlan] = {}
         self._registered_projections: ProjectionBuffers | None = None
         self._quiesced = True
-        if context.dtype != self._torch.bfloat16:
-            raise TypeError(f"MoonEP hidden dtype must be bfloat16, got {context.dtype}")
+        if context.dtype not in (self._torch.bfloat16, self._torch.float16):
+            raise TypeError(
+                f"MoonEP hidden dtype must be bfloat16 or float16, got {context.dtype}"
+            )
+        self.context.attach_buffer(self)
+        try:
+            self.context.ensure_dispatch_workspace(self._torch)
+            self._stream_ptr()
+        except Exception:
+            self.context.detach_buffer(self)
+            raise
 
     def _require_open(self) -> None:
         if self._closed:
             raise RuntimeError("TileXRMoonEPBuffer is closed")
+        if self.context._poisoned:
+            raise RuntimeError("TileXRMoonEPBuffer is poisoned")
 
     def _stream_ptr(self) -> int:
         stream_ptr = _current_stream_ptr(self._torch, self.context.device_index)
@@ -391,6 +486,7 @@ class TileXRMoonEPBuffer:
                 "TileXRMoonEPBuffer is bound to one NPU stream; create a separate "
                 "buffer or synchronize before using another stream"
             )
+        self.context.bind_stream(self, stream_ptr)
         return stream_ptr
 
     def _retain(self, plan: MoonEPPlan, *values: Any) -> None:
@@ -599,12 +695,14 @@ class TileXRMoonEPBuffer:
             self._stream_ptr(),
             route_weights_sk,
             route_weights_nvs,
-            build_dedup=build_dedup,
+            build_dedup=False,
             inter_rank_sync=bool(inter_rank_sync),
+            registered_workspace=self.context.dispatch_workspace[0],
+            registered_workspace_bytes=self.context.dispatch_workspace[1],
         )
         if build_dedup:
             self._plans_needing_dedup.pop(id(plan), None)
-        self._expect_status(plan, _DISPATCH_STATUS_SUCCESS)
+        self._expect_status(plan, 0)
         result = (hidden_nvsh, route_weights_nvs, cu_seqlens, plan)
         if async_finish:
             return (*result, self._record_event())
@@ -896,12 +994,15 @@ class TileXRMoonEPBuffer:
         self._pending_plans.clear()
         self._pending_statuses.clear()
         self._bound_stream_ptr = None
+        self.context.release_stream(self)
         failed = [
             (epoch, status, expected)
             for epoch, status, expected in statuses
             if status != expected
         ]
         if failed:
+            if any(status in (2005, 2006, 2007) for _, status, _ in failed):
+                self.context.mark_poisoned()
             details = ", ".join(
                 f"epoch {epoch}: actual {status}, expected {expected}"
                 for epoch, status, expected in failed
@@ -930,6 +1031,7 @@ class TileXRMoonEPBuffer:
                         projections.udma_handle = None
                     self._registered_projections = None
             finally:
+                self.context.detach_buffer(self)
                 self.context.close()
         finally:
             self._closed = True

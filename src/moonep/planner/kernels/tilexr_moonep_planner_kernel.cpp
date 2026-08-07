@@ -268,8 +268,11 @@ private:
             (static_cast<int64_t>(static_cast<int32_t>(magic_)) << MAGIC_OFFSET) |
             static_cast<int64_t>(kPlannerReadyStep);
         for (uint64_t iteration = 0; iteration < waitIterations_; ++iteration) {
+            __asm__ __volatile__("");
             AscendC::DataCacheCleanAndInvalid<int64_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
                 AscendC::DcciDst::CACHELINE_OUT>(readyGm);
+            __asm__ __volatile__("");
+            AscendC::PipeBarrier<PIPE_ALL>();
             const int64_t value = readyGm.GetValue(0);
             if ((value & MAGIC_MASK) == (expected & MAGIC_MASK) && value >= expected) {
                 return true;
@@ -864,8 +867,6 @@ private:
             CopyGmToUb(routes, topkGm_[tileBegin * k_], tileRoutes);
 
             for (int64_t token = 0; token < tileTokenCount; ++token) {
-                uint64_t seenLow = 0;
-                uint64_t seenHigh = 0;
                 for (int64_t topkIndex = 0; topkIndex < k_; ++topkIndex) {
                     const int64_t route = token * k_ + topkIndex;
                     const int32_t expert = routes.GetValue(route);
@@ -879,17 +880,7 @@ private:
                     const int32_t raw = static_cast<int32_t>(
                         static_cast<int64_t>(dest) * nvS_ + base + globalRank - previous);
 
-                    bool duplicate = false;
-                    if (dest < 64) {
-                        const uint64_t bit = static_cast<uint64_t>(1) << dest;
-                        duplicate = (seenLow & bit) != 0;
-                        seenLow |= bit;
-                    } else {
-                        const uint64_t bit = static_cast<uint64_t>(1) << (dest - 64);
-                        duplicate = (seenHigh & bit) != 0;
-                        seenHigh |= bit;
-                    }
-                    dst.SetValue(route, duplicate ? -raw - 1 : raw);
+                    dst.SetValue(route, raw);
                 }
             }
             CopyUbToGm(dstGm_[tileBegin * k_], dst, tileRoutes);
@@ -914,8 +905,6 @@ private:
             CopyGmToUb(routes, topkGm_[tileBegin * k_], tileRoutes);
 
             for (int64_t token = 0; token < tileTokenCount; ++token) {
-                uint64_t seenLow = 0;
-                uint64_t seenHigh = 0;
                 for (int64_t topkIndex = 0; topkIndex < k_; ++topkIndex) {
                     const int64_t route = token * k_ + topkIndex;
                     const int32_t expert = routes.GetValue(route);
@@ -931,17 +920,7 @@ private:
                     const int32_t raw = static_cast<int32_t>(
                         static_cast<int64_t>(dest) * nvS_ + base + globalRank - previous);
 
-                    bool duplicate = false;
-                    if (dest < 64) {
-                        const uint64_t bit = static_cast<uint64_t>(1) << dest;
-                        duplicate = (seenLow & bit) != 0;
-                        seenLow |= bit;
-                    } else {
-                        const uint64_t bit = static_cast<uint64_t>(1) << (dest - 64);
-                        duplicate = (seenHigh & bit) != 0;
-                        seenHigh |= bit;
-                    }
-                    dst.SetValue(route, duplicate ? -raw - 1 : raw);
+                    dst.SetValue(route, raw);
                 }
             }
             CopyUbToGm(dstGm_[tileBegin * k_], dst, tileRoutes);

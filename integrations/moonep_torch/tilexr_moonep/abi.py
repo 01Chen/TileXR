@@ -88,6 +88,8 @@ class TileXRMoonEPDispatchArgsV1(ctypes.Structure):
         ("hiddenNvsh", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("routeWeightsNvs", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("flags", ctypes.c_uint64),
+        ("registeredWorkspace", ctypes.c_void_p),
+        ("registeredWorkspaceBytes", ctypes.c_uint64),
     ]
 
 

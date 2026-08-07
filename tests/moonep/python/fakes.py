@@ -134,6 +134,10 @@ class FakeTensor:
     def contiguous(self):
         return self
 
+    def zero_(self):
+        self._item = 0
+        return self
+
 
 class FakeStream:
     def __init__(self, value=0xCAFE):
@@ -201,6 +205,15 @@ class FakeRuntime:
         self.calls.append(("planning_workspace_size", None))
         return 64
 
+    def dispatch_workspace_size(self, context):
+        return 2 * 1024 * 1024, 2 * 1024 * 1024
+
+    def register_dispatch_workspace(self, pointer, size):
+        return 7 if self.world_size > 1 else None
+
+    def unregister_dispatch_workspace(self, handle):
+        return None
+
     def planning(self, context, topk, tpe, plan, cu_seqlens, stream, wait_iterations):
         self.calls.append(("planning", plan, stream, wait_iterations))
         if self.write_status_markers:
@@ -218,6 +231,8 @@ class FakeRuntime:
         *,
         build_dedup,
         inter_rank_sync,
+        registered_workspace=None,
+        registered_workspace_bytes=0,
     ):
         self.calls.append(
             (
@@ -236,7 +251,7 @@ class FakeRuntime:
             self.fail_dispatch_calls -= 1
             raise RuntimeError("fake dispatch enqueue failed")
         if self.write_status_markers:
-            plan.status._item = 2000
+            plan.status._item = 0
 
     def prefetch_weight(self, context, plan, projections, stream):
         self.calls.append(("prefetch_weight", plan, projections, stream))

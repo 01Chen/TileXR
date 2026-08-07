@@ -267,8 +267,6 @@ bool BuildReferencePlan(int32_t rank, int32_t rankSize, int64_t s, int64_t k,
     std::vector<int32_t> localCount(static_cast<size_t>(expertCount), 0);
     std::vector<int32_t> dst(static_cast<size_t>(n));
     for (int64_t token = 0; token < s; ++token) {
-        uint64_t seenLow = 0;
-        uint64_t seenHigh = 0;
         for (int64_t topk = 0; topk < k; ++topk) {
             const int64_t route = token * k + topk;
             const int32_t expert = allTopk[static_cast<size_t>(rank * n + route)];
@@ -289,17 +287,7 @@ bool BuildReferencePlan(int32_t rank, int32_t rankSize, int64_t s, int64_t k,
                 allocPrefix[static_cast<size_t>(AllocIndex(expert, dest - 1, rankSize))];
             const int32_t raw = static_cast<int32_t>(dest * nvs +
                 expertOffsets[static_cast<size_t>(dest * expertCount + expert)] + globalRank - previous);
-            bool duplicate = false;
-            if (dest < 64) {
-                const uint64_t bit = static_cast<uint64_t>(1) << dest;
-                duplicate = (seenLow & bit) != 0;
-                seenLow |= bit;
-            } else {
-                const uint64_t bit = static_cast<uint64_t>(1) << (dest - 64);
-                duplicate = (seenHigh & bit) != 0;
-                seenHigh |= bit;
-            }
-            dst[static_cast<size_t>(route)] = duplicate ? -raw - 1 : raw;
+            dst[static_cast<size_t>(route)] = raw;
         }
     }
 

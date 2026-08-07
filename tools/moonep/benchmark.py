@@ -17,7 +17,11 @@ from .case_factory import make_correctness_case
 from .contracts import BackendUnavailableError, MoonEPBackend, MoonEPDimensions
 from .correctness import CorrectnessRunner
 from .expert_forward import run_expert_forward
-from .planner_reference import build_reference_plan, deterministic_all_topk
+from .planner_reference import (
+    DEFAULT_ROUTE_DISTRIBUTION,
+    build_reference_plan,
+    deterministic_all_topk,
+)
 from .rendezvous import (
     completion_barrier_from_env,
     hold_for_managed_abort,
@@ -355,7 +359,8 @@ def _require_exact(name: str, actual: list[int], expected) -> None:
 
 
 def validate_plan(
-    plan, context, cu_seqlens=None, *, expected_status: int = 0
+    plan, context, cu_seqlens=None, *, expected_status: int = 0,
+    route_distribution: str = DEFAULT_ROUTE_DISTRIBUTION,
 ) -> dict[str, object]:
     status = int(plan.status.item())
     if status != int(expected_status):
@@ -375,6 +380,7 @@ def validate_plan(
             context.tokens_per_rank,
             context.topk,
             context.expert_count,
+            route_distribution,
         ),
     )
     _require_exact("dst", _tensor_values(plan.dst), reference.dst)
@@ -485,6 +491,13 @@ def topology_metadata(context) -> dict[str, object]:
             "effective TILEXR_MOONEP_PLANNER_BLOCK_DIM must satisfy "
             f"planner_group_size={context.planner_group_size} <= blockDim <= 64"
         )
+    dispatch_aiv_core_count = int(os.environ.get(
+        "TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT", "64"))
+    if dispatch_aiv_core_count < 1 or dispatch_aiv_core_count > 64:
+        raise ValueError(
+            "effective TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT must satisfy "
+            "1 <= coreCount <= 64"
+        )
     return {
         "global_rank": context.global_rank,
         "global_world_size": context.global_world_size,
@@ -503,6 +516,10 @@ def topology_metadata(context) -> dict[str, object]:
         "planner_block_dim_source": os.environ.get(
             "TILEXR_MOONEP_PLANNER_BLOCK_DIM_SOURCE",
             "default_oversubscribed" if ranks_per_device == 2 else "default_native",
+        ),
+        "dispatch_aiv_core_count": dispatch_aiv_core_count,
+        "dispatch_aiv_core_count_source": os.environ.get(
+            "TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT_SOURCE", "default"
         ),
         "peer_memory_cross_node": context.node_count > 1,
         "cross_node_validated": os.environ.get(

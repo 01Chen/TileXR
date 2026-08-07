@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export TILEXR_UDMA_QP_ROUTE_SPEC=port_count:6,port_count:2
 if [[ -x "${SCRIPT_DIR}/tilexr_moonep_flow_demo" ]]; then
     TILEXR_INSTALL_PREFIX="$(cd "${SCRIPT_DIR}/.." && pwd)"
 else

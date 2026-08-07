@@ -44,12 +44,16 @@ int main()
         "Unexpected PlanningArgsV1 size");
     static_assert(offsetof(TileXRMoonEpPlanningArgsV1, cuSeqlens) == 48,
         "Unexpected PlanningArgsV1 cuSeqlens offset");
-    static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == 64,
+    static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == 80,
         "Unexpected DispatchArgsV1 size");
     static_assert(offsetof(TileXRMoonEpDispatchArgsV1, hiddenSh) == 24,
         "Unexpected DispatchArgsV1 hidden input offset");
     static_assert(offsetof(TileXRMoonEpDispatchArgsV1, routeWeightsNvs) == 48,
         "Unexpected DispatchArgsV1 route-weight output offset");
+    static_assert(offsetof(TileXRMoonEpDispatchArgsV1, registeredWorkspace) == 64,
+        "Unexpected DispatchArgsV1 registered workspace offset");
+    static_assert(offsetof(TileXRMoonEpDispatchArgsV1, registeredWorkspaceBytes) == 72,
+        "Unexpected DispatchArgsV1 registered workspace size offset");
     static_assert(sizeof(TileXRMoonEpPrefetchWeightArgsV1) == 56,
         "Unexpected PrefetchWeightArgsV1 size");
     static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV1, gate) == 24,

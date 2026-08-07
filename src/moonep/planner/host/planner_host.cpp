@@ -54,9 +54,6 @@ int TileXRMoonEpPrepareLayout(TileXRCommPtr comm, int64_t s, int64_t k,
     if (!LocalityValid(*commArgs)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if (commArgs->localRankSize != commArgs->rankSize) {
-        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
-    }
     if (!PeerWindowsReady(*commArgs)) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
@@ -80,9 +77,6 @@ int TileXRMoonEpValidateParams(const PlannerParams &params, const TileXR::CommAr
     }
     if (!LocalityValid(commArgs)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    if (commArgs.localRankSize != commArgs.rankSize) {
-        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
     }
     if (!PeerWindowsReady(commArgs)) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;

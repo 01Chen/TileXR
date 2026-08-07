@@ -87,10 +87,10 @@ int main()
     ok &= Require(kernel, "DataCopyPad", "internal DMA tail handling missing");
     ok &= Require(layout, "TILEXR_MOONEP_PLANNER_BLOCK_DIM", "blockDim override missing");
     ok &= Require(host, "PeerWindowsReady", "all-rank peer-window validation missing");
-    ok &= Require(host, "commArgs->localRankSize != commArgs->rankSize",
-        "Planner layout does not reject cross-node communicators");
-    ok &= Require(host, "commArgs.localRankSize != commArgs.rankSize",
-        "Planner launch does not reject cross-node communicators");
+    ok &= Reject(host, "commArgs->localRankSize != commArgs->rankSize",
+        "Planner layout still rejects cross-node communicators");
+    ok &= Reject(host, "commArgs.localRankSize != commArgs.rankSize",
+        "Planner launch still rejects cross-node communicators");
     ok &= Require(publicHeader, "TileXRMoonEpPlannerGetWorkspaceSizeV2",
         "Planner workspace V2 ABI missing");
     ok &= Require(publicHeader, "TileXRMoonEpPlannerV2", "Planner V2 ABI missing");

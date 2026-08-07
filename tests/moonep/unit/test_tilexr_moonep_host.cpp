@@ -14,12 +14,15 @@ int commReturn = TILEXR_MOONEP_SUCCESS;
 int queryReturn = TILEXR_MOONEP_SUCCESS;
 int plannerReturn = TILEXR_MOONEP_SUCCESS;
 int dispatchReturn = TILEXR_MOONEP_SUCCESS;
+int dispatchUrmaReturn = TILEXR_MOONEP_SUCCESS;
 int combineReturn = TILEXR_MOONEP_SUCCESS;
 int prefetchReturn = TILEXR_MOONEP_SUCCESS;
 int reduceReturn = TILEXR_MOONEP_SUCCESS;
 int queryCalls = 0;
 int plannerCalls = 0;
 int dispatchCalls = 0;
+int dispatchUrmaCalls = 0;
+int dispatchWorkspaceQueryCalls = 0;
 int combineCalls = 0;
 int prefetchCalls = 0;
 int reduceCalls = 0;
@@ -27,6 +30,7 @@ uint64_t queryWorkspaceBytes = 512;
 int64_t queryNvS = 12;
 TileXR::CommArgs commArgs {};
 const TileXRMoonEpDispatchArgsV1 *seenDispatch = nullptr;
+const TileXRMoonEpDispatchArgsV1 *seenDispatchUrma = nullptr;
 const TileXRMoonEpCombineArgsV1 *seenCombine = nullptr;
 aclrtStream seenDispatchStream = nullptr;
 aclrtStream seenCombineStream = nullptr;
@@ -64,10 +68,11 @@ struct PlannerCall {
 
 void Reset()
 {
-    commReturn = queryReturn = plannerReturn = dispatchReturn = combineReturn =
+    commReturn = queryReturn = plannerReturn = dispatchReturn = dispatchUrmaReturn = combineReturn =
         TILEXR_MOONEP_SUCCESS;
     prefetchReturn = reduceReturn = TILEXR_MOONEP_SUCCESS;
-    queryCalls = plannerCalls = dispatchCalls = combineCalls = prefetchCalls = reduceCalls = 0;
+    queryCalls = plannerCalls = dispatchCalls = dispatchUrmaCalls =
+        dispatchWorkspaceQueryCalls = combineCalls = prefetchCalls = reduceCalls = 0;
     queryWorkspaceBytes = 512;
     queryNvS = 12;
     commArgs = TileXR::CommArgs {};
@@ -76,6 +81,7 @@ void Reset()
     queryCall = QueryCall {};
     plannerCall = PlannerCall {};
     seenDispatch = nullptr;
+    seenDispatchUrma = nullptr;
     seenCombine = nullptr;
     seenDispatchStream = nullptr;
     seenCombineStream = nullptr;
@@ -184,6 +190,14 @@ void TestWorkspaceQuery()
     CheckStatus("invalid workspace query", TileXRMoonEpPlanningGetWorkspaceSizeV1(
         comm, 2, 2, 8, 0, 2, &workspaceBytes, &nvS),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
+
+    uint64_t dispatchBytes = 0;
+    uint64_t dispatchAlignment = 0;
+    CheckStatus("dispatch workspace query", TileXRMoonEpDispatchGetWorkspaceSizeV1(
+        comm, 2, 2, 64, TILEXR_MOONEP_DTYPE_BFLOAT16,
+        &dispatchBytes, &dispatchAlignment), TILEXR_MOONEP_SUCCESS);
+    Check(dispatchWorkspaceQueryCalls == 1 && dispatchBytes == 4096 &&
+        dispatchAlignment == 2097152, "dispatch workspace query delegation mismatch");
 }
 
 void TestPlanningDelegation()
@@ -249,6 +263,13 @@ void TestStageDelegation()
     CheckStatus("dispatch", TileXRMoonEpDispatchV1(&dispatch, stream), dispatchReturn);
     Check(dispatchCalls == 1 && seenDispatch == &dispatch && seenDispatchStream == stream,
         "dispatch delegation mismatch");
+
+    dispatch.registeredWorkspace = reinterpret_cast<void *>(uintptr_t {0x800000});
+    dispatch.registeredWorkspaceBytes = 2097152;
+    CheckStatus("URMA dispatch", TileXRMoonEpDispatchV1(&dispatch, stream),
+        dispatchUrmaReturn);
+    Check(dispatchCalls == 1 && dispatchUrmaCalls == 1 &&
+        seenDispatchUrma == &dispatch, "URMA dispatch selection mismatch");
 
     TileXRMoonEpCombineArgsV1 combine {};
     combine.structSize = sizeof(combine);
@@ -318,6 +339,23 @@ int TileXRMoonEpRunDispatchV1(
     seenDispatch = args;
     seenDispatchStream = stream;
     return dispatchReturn;
+}
+
+int TileXRMoonEpQueryDispatchUrmaWorkspace(TileXRCommPtr, int64_t, int64_t,
+    int64_t, uint32_t, uint64_t *workspaceBytes, uint64_t *workspaceAlignment)
+{
+    ++dispatchWorkspaceQueryCalls;
+    *workspaceBytes = 4096;
+    *workspaceAlignment = 2097152;
+    return TILEXR_MOONEP_SUCCESS;
+}
+
+int TileXRMoonEpRunDispatchUrmaV1(
+    const TileXRMoonEpDispatchArgsV1 *args, aclrtStream)
+{
+    ++dispatchUrmaCalls;
+    seenDispatchUrma = args;
+    return dispatchUrmaReturn;
 }
 
 int TileXRMoonEpRunCombineV1(
