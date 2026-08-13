@@ -113,6 +113,18 @@ void TestLaunch()
         seenContext.layout.blockDim == 4,
         "prefetch must cap workers without rejecting the shared-domain QP count");
 
+    Reset();
+    qpNum = 3;
+    plan = Plan(); gate = Weight(0x100000, 4, 8);
+    up = Weight(0x101000, 4, 16); down = Weight(0x102000, 8, 8);
+    args = Args(&plan, &gate, &up, &down);
+    Status("prefetch three QPs",
+        TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(&args, stream),
+        TILEXR_MOONEP_SUCCESS);
+    Check(launchCalls == 1 && seenContext.layout.qpNum == 3 &&
+        seenContext.layout.blockDim == 2,
+        "prefetch three-QP layout must use two workers");
+
     gate.dtype = TILEXR_MOONEP_DTYPE_FLOAT32;
     Status("prefetch dtype", TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(&args, stream), TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     gate = Weight(0x100000, 4, 8); args.flags = 1;
@@ -147,23 +159,6 @@ void TestLaunch()
     Status("prefetch launch failure", TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(&args, stream), -77);
 }
 
-void TestLargeQpCount()
-{
-    Reset();
-    qpNum = 32;
-    auto plan = Plan();
-    auto gate = Weight(0x100000, 4, 8);
-    auto up = Weight(0x101000, 4, 16);
-    auto down = Weight(0x102000, 8, 8);
-    auto args = Args(&plan, &gate, &up, &down);
-    auto stream = reinterpret_cast<aclrtStream>(uintptr_t {0x7000});
-    Status("prefetch 32 QPs",
-        TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(&args, stream),
-        TILEXR_MOONEP_SUCCESS);
-    Check(launchCalls == 1 && seenContext.layout.qpNum == 32 &&
-        seenContext.layout.blockDim == 4,
-        "prefetch must cap workers independently of available QPs");
-}
 }
 
 extern "C" int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&out) { out = hostRet == 0 ? &commArgs : nullptr; return hostRet; }
@@ -173,4 +168,4 @@ extern "C" int TileXRGetUDMARegistryHost(TileXRCommPtr, const TileXR::TileXRUDMA
 extern "C" int TileXRUDMAGetQpCount(TileXRCommPtr, uint32_t *out) { if (qpRet == 0) *out = qpNum; return qpRet; }
 namespace TileXRMoonEp { int TileXRMoonEpLaunchPrefetchWeightKernel(const PrefetchWeightParams &p, const PrefetchWeightLaunchContext &c) { ++launchCalls; seenParams = p; seenContext = c; return launchRet; } }
 
-int main() { TestLaunch(); TestLargeQpCount(); return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE; }
+int main() { TestLaunch(); return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE; }

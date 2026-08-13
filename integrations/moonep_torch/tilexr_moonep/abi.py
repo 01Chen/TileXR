@@ -34,12 +34,6 @@ class TileXRMoonEPStage(IntFlag):
     REDUCE_GRAD = 1 << 4
 
 
-class TileXRMoonEPReduceGradTransport(IntEnum):
-    NONE = 0
-    PEER = 1
-    UDMA = 2
-
-
 class TileXRMoonEPTensorV1(ctypes.Structure):
     _fields_ = [
         ("structSize", ctypes.c_uint32),
@@ -170,16 +164,29 @@ class TileXRMoonEPReduceGradWorkspaceInfoV2(ctypes.Structure):
         ("workspaceBytes", ctypes.c_uint64),
         ("workspaceAlignment", ctypes.c_uint64),
         ("udmaChunkBytes", ctypes.c_uint64),
-        ("peerWindowBytes", ctypes.c_uint64),
-        ("peerHalfBytes", ctypes.c_uint64),
-        ("peerSlotStrideBytes", ctypes.c_uint64),
+        ("laneStateBytes", ctypes.c_uint64),
+        ("laneStateStrideBytes", ctypes.c_uint64),
+        ("bankStrideBytes", ctypes.c_uint64),
+        ("laneStrideBytes", ctypes.c_uint64),
         ("rowBytes", ctypes.c_uint64 * 3),
-        ("transports", ctypes.c_uint32 * 3),
+        ("chunkCounts", ctypes.c_uint64 * 3),
+        ("projectionQpCounts", ctypes.c_uint32 * 3),
+        ("qpCount", ctypes.c_uint32),
         ("blockDim", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
     ]
 
 
-class TileXRMoonEPReduceGradArgsV2(ctypes.Structure):
+class TileXRMoonEPReduceGradSourceSliceV2(ctypes.Structure):
+    _fields_ = [
+        ("data", ctypes.c_void_p),
+        ("bytes", ctypes.c_uint64),
+        ("registrationBase", ctypes.c_void_p),
+        ("registrationBytes", ctypes.c_uint64),
+    ]
+
+
+class TileXRMoonEPReduceGradPrepareArgsV2(ctypes.Structure):
     _fields_ = [
         ("structSize", ctypes.c_uint32),
         ("abiVersion", ctypes.c_uint32),
@@ -188,11 +195,26 @@ class TileXRMoonEPReduceGradArgsV2(ctypes.Structure):
         ("gate", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("up", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("down", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("sources", TileXRMoonEPReduceGradSourceSliceV2 * 3),
         ("workspace", ctypes.c_void_p),
         ("workspaceBytes", ctypes.c_uint64),
+        ("requestedUdmaChunkBytes", ctypes.c_uint64),
+        ("flags", ctypes.c_uint64),
+    ]
+
+
+class TileXRMoonEPReduceGradArgsV2(ctypes.Structure):
+    _fields_ = [
+        ("structSize", ctypes.c_uint32),
+        ("abiVersion", ctypes.c_uint32),
+        ("prepared", ctypes.c_void_p),
+        ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
+        ("gate", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("up", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("down", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("sources", TileXRMoonEPReduceGradSourceSliceV2 * 3),
         ("status", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("waitIterations", ctypes.c_uint64),
-        ("requestedUdmaChunkBytes", ctypes.c_uint64),
         ("flags", ctypes.c_uint64),
     ]
 

@@ -524,6 +524,8 @@ class TileXRMoonEPBuffer:
         self._reduce_grad_inflight = False
         self._reduce_grad_workspace = None
         self._reduce_grad_workspace_allocation = None
+        self._reduce_grad_prepared: int | None = None
+        self._reduce_grad_prepared_refs: tuple[Any, ...] = ()
         self._reduce_grad_signature = None
         self._reduce_grad_info = None
         self._quiesced = True
@@ -748,7 +750,7 @@ class TileXRMoonEPBuffer:
     def _aligned_workspace(self, size_bytes: int, alignment: int):
         if size_bytes <= 0 or alignment <= 0:
             raise ValueError("ReduceGrad workspace size and alignment must be positive")
-        allocation = self._zeros((size_bytes + alignment - 1,), self._torch.uint8)
+        allocation = self._empty((size_bytes + alignment - 1,), self._torch.uint8)
         offset = (-int(allocation.data_ptr())) % alignment
         workspace = allocation.narrow(0, offset, size_bytes)
         if int(workspace.data_ptr()) % alignment != 0:
@@ -1195,11 +1197,35 @@ class TileXRMoonEPBuffer:
         self._require_open()
         self._validate_plan(plan)
         self._validate_projection_buffers(gradients, reduce=True)
+        sources, source_registrations = self._reduce_grad_source_regions(gradients)
         shape_signature = (
-            tuple(_shape(getattr(gradients, name)) for name in ("gate", "up", "down")),
+            tuple(
+                (
+                    int(getattr(gradients, name).data_ptr()),
+                    _shape(getattr(gradients, name)),
+                )
+                for name in ("gate", "up", "down")
+            ),
+            tuple(
+                (int(source.data_ptr()), int(source.numel()) * int(source.element_size()))
+                for source in sources
+            ),
+            tuple(
+                (
+                    int(registration.data_ptr()),
+                    int(registration.numel()) * int(registration.element_size()),
+                )
+                for registration in source_registrations
+            ),
+            int(plan.experts_to_copy.data_ptr()),
+            int(plan.n),
+            int(plan.topk),
             self.requested_udma_chunk_bytes,
         )
-        if self._reduce_grad_signature == shape_signature:
+        if (
+            self._reduce_grad_signature == shape_signature
+            and self._reduce_grad_prepared is not None
+        ):
             return self._reduce_grad_info
 
         info = self.runtime.reduce_grad_workspace_info(
@@ -1208,33 +1234,67 @@ class TileXRMoonEPBuffer:
             gradients,
             requested_udma_chunk_bytes=self.requested_udma_chunk_bytes,
         )
-        if self._reduce_grad_signature is not None:
-            if not self._quiesced:
-                self.synchronize()
-            self.runtime.unregister_reduce_grad_workspace(owner_token=_owner_token)
-            self._reduce_grad_workspace = None
-            self._reduce_grad_workspace_allocation = None
-            self._reduce_grad_signature = None
-            self._reduce_grad_info = None
+        if not self._quiesced:
+            self.synchronize()
+        if self._reduce_grad_prepared is not None:
+            self.runtime.destroy_reduce_grad(self._reduce_grad_prepared)
+        self._reduce_grad_prepared = None
+        self._reduce_grad_prepared_refs = ()
+        self._reduce_grad_workspace = None
+        self._reduce_grad_workspace_allocation = None
+        self._reduce_grad_signature = None
+        self._reduce_grad_info = None
 
-        if info.uses_udma:
-            if not self._quiesced:
-                self.synchronize()
-            workspace, allocation = self._aligned_workspace(
-                info.workspace_bytes, info.workspace_alignment
-            )
-            self.quiesce()
-            self.runtime.register_reduce_grad_workspace(
-                workspace, info.workspace_bytes, owner_token=_owner_token
-            )
-            self._reduce_grad_workspace = workspace
-            self._reduce_grad_workspace_allocation = allocation
-        else:
-            self._reduce_grad_workspace = None
-            self._reduce_grad_workspace_allocation = None
+        workspace, allocation = self._aligned_workspace(
+            info.workspace_bytes, info.workspace_alignment
+        )
+        prepared = self.runtime.prepare_reduce_grad(
+            self.context,
+            plan,
+            gradients,
+            sources,
+            source_registrations,
+            workspace,
+            requested_udma_chunk_bytes=self.requested_udma_chunk_bytes,
+        )
+        self._reduce_grad_workspace = workspace
+        self._reduce_grad_workspace_allocation = allocation
+        self._reduce_grad_prepared = prepared
+        self._reduce_grad_prepared_refs = (
+            plan,
+            gradients,
+            *sources,
+            *source_registrations,
+            workspace,
+            allocation,
+        )
         self._reduce_grad_signature = shape_signature
         self._reduce_grad_info = info
         return info
+
+    def _reduce_grad_source_regions(
+        self, gradients: ProjectionBuffers
+    ) -> tuple[tuple[Any, Any, Any], tuple[Any, Any, Any]]:
+        names = ("gate_reduce", "up_reduce", "down_reduce")
+        reduce_buffers = tuple(getattr(gradients, name) for name in names)
+        if all(value is None for value in reduce_buffers):
+            begin = self.context.expert_count
+            count = self.context.prefetch_slots
+            registrations = tuple(
+                getattr(gradients, name) for name in ("gate", "up", "down")
+            )
+            sources = tuple(
+                getattr(gradients, name).narrow(0, begin, count)
+                for name in ("gate", "up", "down")
+            )
+            return sources, registrations
+        sources = tuple(
+            value[self.context.planner_group_rank] for value in reduce_buffers
+        )
+        return sources, reduce_buffers
+
+    def _reduce_grad_sources(self, gradients: ProjectionBuffers) -> tuple[Any, Any, Any]:
+        return self._reduce_grad_source_regions(gradients)[0]
 
     @property
     def reduce_grad_info(self):
@@ -1262,16 +1322,6 @@ class TileXRMoonEPBuffer:
             down_reduce_buffer,
         )
         self._validate_projection_buffers(gradients, reduce=True)
-        legacy_names = ("gate_reduce", "up_reduce", "down_reduce")
-        legacy_buffers = [getattr(gradients, name) for name in legacy_names]
-        if all(value is not None for value in legacy_buffers):
-            begin = self.context.expert_count
-            end = begin + self.context.prefetch_slots
-            for full_name, reduce_name in zip(("gate", "up", "down"), legacy_names):
-                getattr(gradients, full_name)[begin:end].copy_(
-                    getattr(gradients, reduce_name)[self.context.planner_group_rank]
-                )
-
         self.runtime._acquire_reduce_grad(self._reduce_grad_owner_token)
         self._reduce_grad_token_held = True
         retained = False
@@ -1279,14 +1329,14 @@ class TileXRMoonEPBuffer:
             self.prepare_reduce_grad(
                 plan, gradients, _owner_token=self._reduce_grad_owner_token
             )
-            if self._reduce_grad_info is not None and self._reduce_grad_info.uses_udma:
-                self._synchronize_device()
-                self.runtime.register_reduce_grad_workspace(
-                    self._reduce_grad_workspace,
-                    self._reduce_grad_info.workspace_bytes,
-                    owner_token=self._reduce_grad_owner_token,
-                )
-            self._retain(plan, gradients, self._reduce_grad_workspace)
+            sources, source_registrations = self._reduce_grad_source_regions(gradients)
+            self._retain(
+                plan,
+                gradients,
+                sources,
+                source_registrations,
+                self._reduce_grad_workspace,
+            )
             retained = True
             if all(existing is not plan for existing in self._pending_reduce_plans):
                 self._pending_reduce_plans.append(plan)
@@ -1294,15 +1344,13 @@ class TileXRMoonEPBuffer:
                 self.context,
                 plan,
                 gradients,
-                self._reduce_grad_workspace,
+                sources,
+                source_registrations,
+                self._reduce_grad_prepared,
                 self._stream_ptr(),
                 self.wait_iterations,
-                requested_udma_chunk_bytes=self.requested_udma_chunk_bytes,
             )
             self._reduce_grad_inflight = True
-            if all(value is not None for value in legacy_buffers):
-                for value in legacy_buffers:
-                    value[self.context.planner_group_rank].zero_()
             return self._record_event() if async_finish else None
         except Exception:
             if retained:
@@ -1425,8 +1473,11 @@ class TileXRMoonEPBuffer:
                     self._dispatch_flag_before_snapshots.pop(id(plan), None)
                 else:
                     failed_dispatch_plans.append((plan, actual, expected))
-            for plan in self._pending_reduce_plans:
-                statuses.append((plan.epoch, int(plan.reduce_grad_status.item()), 0))
+            reduce_statuses = [
+                (plan.epoch, int(plan.reduce_grad_status.item()), 0)
+                for plan in self._pending_reduce_plans
+            ]
+            statuses.extend(reduce_statuses)
             self._pending_refs.clear()
             self._pending_plans.clear()
             self._pending_reduce_plans.clear()
@@ -1443,7 +1494,9 @@ class TileXRMoonEPBuffer:
                     for plan, actual, _ in failed_dispatch_plans:
                         self._dump_failed_dispatch_completion_flags(plan, actual)
                 dispatch_dfx = self._dispatch_dfx_summary()
-                if any(status in (2005, 2006, 2007) for _, status, _ in failed):
+                if any(status in (2005, 2006, 2007) for _, status, _ in failed) or any(
+                    status in (1, 2, 3, 4, 5) for _, status, _ in reduce_statuses
+                ):
                     self.context.mark_poisoned()
                 details = ", ".join(
                     f"epoch {epoch}: actual {status}, expected {expected}"
@@ -1473,7 +1526,9 @@ class TileXRMoonEPBuffer:
             sync_error = exc
         try:
             try:
-                self.runtime.unregister_reduce_grad_workspace()
+                self.runtime.destroy_reduce_grad(self._reduce_grad_prepared)
+                self._reduce_grad_prepared = None
+                self._reduce_grad_prepared_refs = ()
             finally:
                 try:
                     if self._registered_projections is not None:
@@ -1495,6 +1550,8 @@ class TileXRMoonEPBuffer:
             self._registered_projections = None
             self._reduce_grad_workspace = None
             self._reduce_grad_workspace_allocation = None
+            self._reduce_grad_prepared = None
+            self._reduce_grad_prepared_refs = ()
         if sync_error is not None:
             raise sync_error
 
