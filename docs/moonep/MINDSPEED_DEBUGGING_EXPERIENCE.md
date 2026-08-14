@@ -40,6 +40,7 @@ Python 侧的 `plan.status.zero_()` 不是可靠修复：NPU task queue 和 Kern
 | ReduceGrad 第二轮 CQ 失败，`entryIdx=0x4000` | `entryIdx` 携带 SQ cycle，原实现错误地要求它小于 ring depth | 先按 depth 归一化，再依据绝对 SQ tail 计算完成 BB 数 | 两轮同 QP 精确复现；dump raw CQE、SQ head/tail、outstanding |
 | Combine 后复用 plan 的反向 Dispatch 超时 | 旧 `status=3000` 违反 URMA 输入协议，异步 Python reset 又存在跨 stream 竞态 | consumer Host 在同一 stream reset；先检查旧首错误，不能掩盖真实失败 | 生产规模 oracle 对比不清理、异步清理、同步清理和 Host same-stream reset |
 | 4K grouped Dispatch 超时或 SQ 满 | 全量 route 无法一次装入 UB，WQE 也不能一次塞入 SQ | route tiling、WQE 分批发布、每批 CQ 回收，以 `head-tail` 计算 outstanding | case 15 生产规模单算子和 H=7168 grouped oracle |
+| 双机 ReduceGrad prepare 返回 `-4`，HCCP 为 `528101` | packed adapter 的占位 Up source 只有 2 KiB，逻辑 view 同时被当作 MR 注册范围 | 保持 source shape/bytes 不变，为 view 提供实机验证过的 2 MiB backing，并在 FFI 中分别描述逻辑 source 与 registration storage | 双机日志定位失败 region/bytes/返回码；两机 NPU probe 证明 source 2 KiB、MR 2 MiB；2 机 16 卡完整模型 8/8 迭代通过 |
 
 “重复 MR 注册泄漏”“完全没有 poll CQ”“peer 调度不对称”都曾是合理假设，但被后续
 A/B、原始队列状态和成功对照推翻，不应继续作为既定根因传播。
@@ -168,7 +169,16 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - 同时覆盖 1-BB 和多 BB WQE；
 - balanced、model-skew、sparse 和 unique routing；
 - `S=4096`、`K=8`、`H=7168`、EP8 的生产规模；
-- 正确性运行开启失败时 DFX，性能运行关闭 trace、dump、DFX 和 profiler。
+- 正确性运行可按需开启失败时 DFX。纯吞吐性能运行关闭 trace、dump、DFX 和 profiler；
+  需要算子耗时统计时，保持 trace、dump、DFX、调试同步和 stage barrier 关闭，只开启
+  框架 NPU profiler，并单独标注为 profiling-on 数据。
+
+性能复测不能只检查运行时环境变量。Dispatch DFX 和部分 profiling 是编译期 CMake
+选项；即使 provenance 显示 trace/dump/profile 都关闭，已嵌入 `.so` 的 AICore binary
+仍可能包含 DFX 路径。性能运行前必须同时保存并核对 CMake cache、实际加载库哈希和
+运行时环境，普通 Release 构建应默认关闭 DFX，需要诊断时再显式开启并重新构建。
+框架 NPU profiler 与 Kernel 编译期 DFX/profiling 必须分开记录：前者可用于算子计时，
+后者会改变被测 Kernel 路径，不能在默认性能构建中开启。
 
 ## 避免重复踩坑
 
@@ -179,8 +189,34 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - 不要用 toy shape 证明生产规模的 UB/SQ 容量安全。
 - 不要依赖已消费 SQE 的内容推导 CQ completion。
 - 不要在调试运行和性能运行之间复用未审计的环境变量。
+- 不要把小 Tensor view 的逻辑字节数等同于 HCCP MR 范围；扩大 backing storage 时保持逻辑 shape 不变，否则会污染算子工作量和性能数据。
 - 不要因某次补丁通过完整模型就跳过最小 reproducer；最小 reproducer 才能证明因果。
 - 不要删除被推翻的假设记录。保留否定证据可以防止后续重复猜测。
+
+## Combine V2 共享 scratch 的 completion 约束
+
+ring 调度可以把发送工作分给不同 AIV core，但不能据此把接收完成条件也按 core
+分片。每个 core 的 reduction 都会读取包含所有 source 写入的共享 scratch，因此每个
+consumer core 必须在 reduction 前观察全部 source 和 lane 的 Done token；只等待本 core
+负责发送的 source 会在远端写仍在进行时提前读取，表现为偶发少聚合，而不是稳定超时。
+
+本地 Self copy 也必须进入同一 completion 协议。只有在 Self 的最后一笔 MTE3 写完成后
+才能发布本地 Done，然后才能发布 step grant。不能把 `source == rank` 直接视为 ready，
+否则其他 core 仍可能早于本地 copy 完成开始 reduction。
+
+不要用 launch-wide barrier 修复这个问题。Host 的 launch block 数可能大于运行时 active
+block 数，inactive block 会提前返回，`SyncAll` 的参与者集合因而无法收敛。应使用现有
+magic/epoch/step 编码的 GM Done token 表达真实 producer-consumer 依赖。验证至少覆盖：
+
+- 非 2 次幂 rank 的轮询游标，不能用位与代替取模；
+- route weights、Prefetch、额外 plan、registration 切换和 plan reuse；
+- 所有 rank 的 Dispatch/Combine hidden 与 weight 逐元素比较；
+- 完整前反向模型的有限 loss/gradient，而不能只看进程退出码。
+
+2026-08-13 的根因 oracle 使用单机 8 rank、S=4096、K=8、H=7168、model-skew
+路由。修复后 5 轮严格 oracle 全 rank exact，随后单机 8 卡和双机 16 卡完整模型均达到
+8/8 且 loss/gradient 有限。该结果只证明已测试的 Ascend950PR、B131 CANN 和对应拓扑；
+其他硬件、rank 规模和 topology 仍需按相同测试阶梯验证。
 
 ## Dispatch V2 fused epoch 约束与验证边界
 
