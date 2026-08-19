@@ -5,6 +5,7 @@
 
 #include "dispatch_layout.h"
 #include "dispatch_profile.h"
+#include "dispatch_trace.h"
 #include "tilexr_types.h"
 
 namespace {
@@ -74,8 +75,14 @@ void TestReferenceShape()
     CHECK_TRUE(layout.commonOffset >=
         layout.weight.scratchOffset + layout.weight.scratchBytes);
     CHECK_EQ(layout.completionFlagsBytes, UINT64_C(8192));
-    CHECK_TRUE(layout.signalOffset >=
+    CHECK_EQ(layout.creditBytes, UINT64_C(2) * 128U * 512U);
+    CHECK_EQ(layout.creditSourceBytes, UINT64_C(64) * 16U * 64U);
+    CHECK_TRUE(layout.creditOffset >=
         layout.completionFlagsOffset + layout.completionFlagsBytes);
+    CHECK_TRUE(layout.creditSourceOffset >=
+        layout.creditOffset + layout.creditBytes);
+    CHECK_TRUE(layout.signalOffset >=
+        layout.creditSourceOffset + layout.creditSourceBytes);
     CHECK_EQ(layout.profileBytes,
         UINT64_C(64) * sizeof(TileXRMoonEp::DispatchProfileRecord));
     CHECK_EQ(layout.dfxBytes,
@@ -141,11 +148,35 @@ void TestFailuresAndModes()
     CHECK_EQ(layout.hidden.rowBytes, UINT64_C(6));
 }
 
+void TestTraceLayout()
+{
+    uint64_t coreOffset = 0U;
+    uint64_t eventOffset = 0U;
+    uint64_t traceBytes = 0U;
+    CHECK_TRUE(TileXRMoonEp::DispatchTraceLayout(
+        2U, 3U, coreOffset, eventOffset, traceBytes));
+    CHECK_EQ(coreOffset, UINT64_C(4096));
+    CHECK_EQ(eventOffset, UINT64_C(12288));
+    CHECK_EQ(traceBytes, UINT64_C(36864));
+    CHECK_EQ(TileXRMoonEp::DispatchTraceCoreRecordOffset(1U, 2U),
+        UINT64_C(8320));
+    CHECK_EQ(TileXRMoonEp::DispatchTraceEventOffset(1U, 2U, 2U, 2U, 3U),
+        UINT64_C(25088));
+    CHECK_TRUE(!TileXRMoonEp::DispatchTraceLayout(
+        0U, 3U, coreOffset, eventOffset, traceBytes));
+    CHECK_TRUE(!TileXRMoonEp::DispatchTraceLayout(
+        2U, 0U, coreOffset, eventOffset, traceBytes));
+    CHECK_TRUE(!TileXRMoonEp::DispatchTraceLayout(
+        TileXRMoonEp::kDispatchTraceMaxIterations + 1U, 3U,
+        coreOffset, eventOffset, traceBytes));
+}
+
 } // namespace
 
 int main()
 {
     TestReferenceShape();
     TestFailuresAndModes();
+    TestTraceLayout();
     return g_failures == 0 ? 0 : 1;
 }

@@ -11,6 +11,7 @@
 #include "dispatch_launch.h"
 #include "dispatch_layout.h"
 #include "../common/dispatch_schedule.h"
+#include "../common/dispatch_trace.h"
 #include "../common/dispatch_wqe_batch.h"
 #include "tilexr_api.h"
 #include "tilexr_types.h"
@@ -59,8 +60,7 @@ bool DispatchVectorBatchShapeSupported(uint64_t routeCount,
 {
     constexpr uint64_t vectorCompareMinElements = 256U / sizeof(int32_t);
     return routeCount >= vectorCompareMinElements &&
-        routeCount <= static_cast<uint64_t>(INT16_MAX) + 1U &&
-        routeCount <= UINT32_MAX / sizeof(int32_t) &&
+        routeCount <= UINT32_MAX &&
         destinationCapacity >= routeCount &&
         destinationCapacity <= UINT32_MAX &&
         (destinationCapacity & (destinationCapacity - 1U)) == 0U &&
@@ -83,18 +83,6 @@ int ValidateDispatchPeerConfig(const DispatchPeerConfig &config,
     if (commArgs.rankSize > 1 &&
         DispatchGroupedGroupCount(commArgs.rankSize, config.groupWidth) == 0U) {
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
-    }
-    if (!DispatchPeerModeUsesCredit(static_cast<uint32_t>(config.mode))) {
-        return TILEXR_MOONEP_SUCCESS;
-    }
-    const char *creditEnabled = std::getenv("TILEXR_ENABLE_CREDIT_IPC");
-    if (creditEnabled == nullptr || std::strcmp(creditEnabled, "1") != 0) {
-        return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
-    }
-    for (int32_t peer = 0; peer < commArgs.rankSize; ++peer) {
-        if (commArgs.creditMems[peer] == nullptr) {
-            return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
-        }
     }
     return TILEXR_MOONEP_SUCCESS;
 }
@@ -178,6 +166,32 @@ bool RangesOverlap(const void *lhs, uint64_t lhsBytes, const void *rhs, uint64_t
     }
     return lhsBegin < rhsBegin + static_cast<uintptr_t>(rhsBytes) &&
         rhsBegin < lhsBegin + static_cast<uintptr_t>(lhsBytes);
+}
+
+int ResolveDispatchTrace(const TileXRMoonEpDispatchArgsV1 &args,
+    const TileXRMoonEpDispatchTraceV1 *&trace, uint64_t &requiredBytes)
+{
+    trace = nullptr;
+    requiredBytes = 0U;
+    const std::size_t traceFieldEnd = offsetof(TileXRMoonEpDispatchArgsV1, trace) +
+        sizeof(args.trace);
+    if (args.structSize < traceFieldEnd || args.trace == nullptr) {
+        return TILEXR_MOONEP_SUCCESS;
+    }
+    trace = args.trace;
+    uint64_t coreRecordOffset = 0U;
+    uint64_t eventOffset = 0U;
+    if (trace->structSize < sizeof(*trace) ||
+        trace->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 ||
+        trace->buffer == nullptr || trace->bufferBytes == 0U ||
+        trace->iteration >= trace->iterationCount || trace->reserved != 0U ||
+        reinterpret_cast<uintptr_t>(trace->buffer) % alignof(DispatchTraceEvent) != 0U ||
+        !DispatchTraceLayout(trace->iterationCount, trace->eventCapacity,
+            coreRecordOffset, eventOffset, requiredBytes) ||
+        trace->bufferBytes < requiredBytes) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+    return TILEXR_MOONEP_SUCCESS;
 }
 
 int SelectPayload(const TileXRMoonEpPlanV1 &plan,
@@ -312,7 +326,8 @@ int TileXRMoonEpQueryDispatchUrmaWorkspace(TileXRCommPtr comm, int64_t s,
 static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
     aclrtStream stream, bool resetStatus)
 {
-    if (args == nullptr || args->structSize < sizeof(*args) ||
+    const std::size_t baseArgsBytes = offsetof(TileXRMoonEpDispatchArgsV1, trace);
+    if (args == nullptr || args->structSize < baseArgsBytes ||
         (args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 &&
             args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V2) ||
         stream == nullptr ||
@@ -328,9 +343,16 @@ static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
 
+    const TileXRMoonEpDispatchTraceV1 *trace = nullptr;
+    uint64_t traceRequiredBytes = 0U;
+    int ret = ResolveDispatchTrace(*args, trace, traceRequiredBytes);
+    if (ret != TILEXR_MOONEP_SUCCESS) {
+        return ret;
+    }
+
     DispatchPayloadMode hiddenMode = DispatchPayloadMode::Hidden;
     int64_t h = 0;
-    int ret = SelectPayload(*args->plan, *args->hiddenSh, *args->hiddenNvsh,
+    ret = SelectPayload(*args->plan, *args->hiddenSh, *args->hiddenNvsh,
         &hiddenMode, &h);
     if (ret != TILEXR_MOONEP_SUCCESS || hiddenMode != DispatchPayloadMode::Hidden) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
@@ -426,6 +448,17 @@ static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
             args->plan->zeroFillRanges, zeroFillBytes)) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
+    if (trace != nullptr &&
+        (RangesOverlap(trace->buffer, traceRequiredBytes,
+             args->registeredWorkspace, args->registeredWorkspaceBytes) ||
+         RangesOverlap(trace->buffer, traceRequiredBytes,
+              args->plan->dst, dstBytes) ||
+         RangesOverlap(trace->buffer, traceRequiredBytes,
+              args->plan->zeroFillRanges, zeroFillBytes) ||
+         RangesOverlap(trace->buffer, traceRequiredBytes,
+              args->plan->status, sizeof(int32_t)))) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
     for (uint32_t lhs = 0; lhs < rangeCount; ++lhs) {
         if (RangesOverlap(ranges[lhs].data, ranges[lhs].bytes,
                 args->registeredWorkspace, args->registeredWorkspaceBytes) ||
@@ -435,6 +468,10 @@ static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
                 args->plan->zeroFillRanges, zeroFillBytes) ||
             RangesOverlap(ranges[lhs].data, ranges[lhs].bytes,
                 args->plan->status, sizeof(int32_t))) {
+            return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+        }
+        if (trace != nullptr && RangesOverlap(ranges[lhs].data,
+                ranges[lhs].bytes, trace->buffer, traceRequiredBytes)) {
             return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
         }
         for (uint32_t rhs = lhs + 1U; rhs < rangeCount; ++rhs) {
@@ -456,6 +493,13 @@ static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
     params.peerMode = peerConfig.mode;
     params.groupWidth = peerConfig.groupWidth;
     params.zeroFillRangeCount = args->plan->e + args->plan->b;
+    if (trace != nullptr) {
+        params.trace = trace->buffer;
+        params.traceBytes = trace->bufferBytes;
+        params.traceIteration = trace->iteration;
+        params.traceIterationCount = trace->iterationCount;
+        params.traceEventCapacity = trace->eventCapacity;
+    }
     params.layout = layout;
     params.hiddenInput = args->hiddenSh->data;
     params.hiddenOutput = args->hiddenNvsh->data;

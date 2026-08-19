@@ -170,6 +170,8 @@ int TileXRMoonEpLaunchDispatchUrmaKernel(const DispatchUrmaLaunchParams &params)
         params.layout.weight.scratchOffset,
         params.layout.weight.rowBytes,
         params.layout.completionFlagsOffset,
+        params.layout.creditOffset,
+        params.layout.creditSourceOffset,
         params.layout.signalOffset,
         params.layout.hiddenProfileOffset,
         params.layout.weightProfileOffset,
@@ -187,6 +189,11 @@ int TileXRMoonEpLaunchDispatchUrmaKernel(const DispatchUrmaLaunchParams &params)
         TileXRMoonEpDispatchCompletionTimeoutTicks(),
         static_cast<uint64_t>(params.peerMode),
         params.groupWidth,
+        static_cast<GM_ADDR>(params.trace),
+        params.traceBytes,
+        params.traceIteration,
+        params.traceIterationCount,
+        params.traceEventCapacity,
     };
 
     rtArgsEx_t argsInfo {};

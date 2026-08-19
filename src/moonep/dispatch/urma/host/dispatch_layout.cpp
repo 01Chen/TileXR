@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "comm_args.h"
+#include "../common/dispatch_credit.h"
 #include "../common/dispatch_profile.h"
 #include "../common/dispatch_wqe_batch.h"
 #include "tilexr_types.h"
@@ -116,10 +117,14 @@ int TileXRMoonEpBuildDispatchUrmaLayout(int64_t rankSize, int64_t s, int64_t k,
     next.commonOffset = TileXRMoonEpDispatchUrmaAlignUp(
         cursor, kDispatchInternalAlignmentBytes);
     cursor = next.commonOffset;
+    next.creditBytes = kDispatchCreditBytes;
+    next.creditSourceBytes = kDispatchCreditSourceBytes;
     if (next.commonOffset == std::numeric_limits<uint64_t>::max() ||
         !CheckedMul(kDispatchMaxDesignRankCount * kDispatchQpCount, sizeof(uint64_t),
             &next.completionFlagsBytes) ||
         !AppendBytes(next.completionFlagsBytes, &cursor, &next.completionFlagsOffset) ||
+        !AppendBytes(next.creditBytes, &cursor, &next.creditOffset) ||
+        !AppendBytes(next.creditSourceBytes, &cursor, &next.creditSourceOffset) ||
         !CheckedMul(kDispatchAivCoreCount, kDispatchSignalStrideBytes,
             &next.signalBytes) ||
         !AppendBytes(next.signalBytes, &cursor, &next.signalOffset) ||
@@ -150,6 +155,8 @@ int TileXRMoonEpBuildDispatchUrmaLayout(int64_t rankSize, int64_t s, int64_t k,
     const uint64_t commonShift = boundCommonOffset - next.commonOffset;
     next.commonOffset = boundCommonOffset;
     next.completionFlagsOffset += commonShift;
+    next.creditOffset += commonShift;
+    next.creditSourceOffset += commonShift;
     next.signalOffset += commonShift;
     next.hiddenProfileOffset += commonShift;
     next.weightProfileOffset += commonShift;
@@ -183,6 +190,8 @@ int TileXRMoonEpBindDispatchUrmaWorkspace(uint64_t workspaceBytes,
     const uint64_t shift = nextCommonOffset - layout->commonOffset;
     layout->commonOffset = nextCommonOffset;
     layout->completionFlagsOffset += shift;
+    layout->creditOffset += shift;
+    layout->creditSourceOffset += shift;
     layout->signalOffset += shift;
     layout->hiddenProfileOffset += shift;
     layout->weightProfileOffset += shift;

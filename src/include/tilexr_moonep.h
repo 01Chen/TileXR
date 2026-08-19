@@ -97,6 +97,17 @@ typedef struct TileXRMoonEpPlanningArgsV1 {
     uint64_t flags;
 } TileXRMoonEpPlanningArgsV1;
 
+typedef struct TileXRMoonEpDispatchTraceV1 {
+    uint32_t structSize;
+    uint32_t abiVersion;
+    void *buffer;
+    uint64_t bufferBytes;
+    uint32_t iteration;
+    uint32_t iterationCount;
+    uint32_t eventCapacity;
+    uint32_t reserved;
+} TileXRMoonEpDispatchTraceV1;
+
 typedef struct TileXRMoonEpDispatchArgsV1 {
     uint32_t structSize;
     uint32_t abiVersion;
@@ -109,6 +120,7 @@ typedef struct TileXRMoonEpDispatchArgsV1 {
     uint64_t flags;
     void *registeredWorkspace;
     uint64_t registeredWorkspaceBytes;
+    const TileXRMoonEpDispatchTraceV1 *trace;
 } TileXRMoonEpDispatchArgsV1;
 
 /*

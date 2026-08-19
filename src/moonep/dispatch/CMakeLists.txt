@@ -133,6 +133,7 @@ tilexr_add_moonep_kernel(tilexr_moonep_dispatch_urma_kernel
         "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_credit.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_profile.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_schedule.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_trace.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_wqe_batch.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h"

@@ -25,6 +25,11 @@ constexpr uint64_t kDispatchCreditPlaneBytes =
     static_cast<uint64_t>(TileXR::CREDIT_IPC_SLOT_BYTES);
 constexpr uint64_t kDispatchCreditBytes =
     static_cast<uint64_t>(TileXR::CREDIT_IPC_BYTES);
+constexpr uint32_t kDispatchCreditMaxGroupCount = 16U;
+constexpr uint64_t kDispatchCreditSourceStrideBytes = 64U;
+constexpr uint64_t kDispatchCreditSourceBytes =
+    static_cast<uint64_t>(kDispatchAivCoreCount) *
+    kDispatchCreditMaxGroupCount * kDispatchCreditSourceStrideBytes;
 
 static_assert(kDispatchCreditStrideBytes ==
         static_cast<uint64_t>(TileXR::CREDIT_IPC_STRIDE),
@@ -32,6 +37,9 @@ static_assert(kDispatchCreditStrideBytes ==
 static_assert(kDispatchCreditBytes ==
         kDispatchCreditPingPongSlots * kDispatchCreditPlaneBytes,
     "Dispatch credit ping-pong layout changed");
+static_assert(kDispatchCreditMaxGroupCount * 8U >=
+        static_cast<uint32_t>(TileXR::TILEXR_MAX_RANK_SIZE),
+    "Dispatch credit source slots do not cover width-8 groups");
 
 TILEXR_MOONEP_CREDIT_INLINE bool DispatchCreditToken(
     int64_t magic, uint32_t group, uint64_t &token)
@@ -58,6 +66,15 @@ TILEXR_MOONEP_CREDIT_INLINE uint64_t DispatchCreditEntryOffset(
     return destinationRank >= static_cast<uint32_t>(TileXR::TILEXR_MAX_RANK_SIZE) ?
         UINT64_MAX :
         static_cast<uint64_t>(destinationRank) * kDispatchCreditStrideBytes;
+}
+
+TILEXR_MOONEP_CREDIT_INLINE uint64_t DispatchCreditSourceOffset(
+    uint32_t core, uint32_t group)
+{
+    return core >= kDispatchAivCoreCount ||
+        group >= kDispatchCreditMaxGroupCount ? UINT64_MAX :
+        (static_cast<uint64_t>(core) * kDispatchCreditMaxGroupCount + group) *
+            kDispatchCreditSourceStrideBytes;
 }
 
 TILEXR_MOONEP_CREDIT_INLINE bool DispatchCreditRequired(uint32_t group)
