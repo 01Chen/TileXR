@@ -81,8 +81,12 @@ int main()
         ReadFile("src/moonep/dispatch/urma/host/dispatch_host.cpp");
     const std::string dispatchUrmaLaunch =
         ReadFile("src/moonep/dispatch/urma/host/dispatch_launch.cpp");
+    const std::string dispatchUrmaLaunchHeader =
+        ReadFile("src/moonep/dispatch/urma/host/dispatch_launch.h");
     const std::string dispatchUrmaKernel =
         ReadFile("src/moonep/dispatch/urma/kernels/tilexr_moonep_dispatch_kernel.cpp");
+    const std::string dispatchTrace =
+        ReadFile("src/moonep/dispatch/urma/common/dispatch_trace.h");
     const std::string combineCmake = ReadFile("src/moonep/combine/CMakeLists.txt");
     const std::string prefetchCmake = ReadFile("src/moonep/prefetch_weight/CMakeLists.txt");
     const std::string reduceCmake = ReadFile("src/moonep/reduce_grad/CMakeLists.txt");
@@ -105,6 +109,7 @@ int main()
     Contains("public header", header, "TileXRMoonEpTensorV1");
     Contains("public header", header, "TileXRMoonEpPlanV1");
     Contains("public header", header, "registeredWorkspace");
+    Contains("public header", header, "TileXRMoonEpDispatchTraceV1");
     Contains("public header", header, "TileXRMoonEpDispatchGetWorkspaceSizeV1");
     Contains("public header", header, "TileXRMoonEpDispatchGetWorkspaceSizeV2");
     Contains("public header", header, "TileXRMoonEpDispatchV2");
@@ -178,6 +183,8 @@ int main()
         "zeroFillRangeCount > UINT32_MAX");
     Contains("URMA dispatch launch", dispatchUrmaLaunch, "params.zeroFillRanges");
     Contains("URMA dispatch launch", dispatchUrmaLaunch, "zeroFillRangeCount");
+    Contains("URMA dispatch launch header", dispatchUrmaLaunchHeader,
+        "sizeof(DispatchKernelArgs) == 40U * sizeof(uint64_t)");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
         "tilexr_moonep_dispatch_urma_kernel");
     Contains("URMA dispatch kernel", dispatchUrmaKernel, "destinationCapacityArg");
@@ -185,62 +192,116 @@ int main()
         "ClearDispatchZeroFillRanges");
     Contains("URMA dispatch kernel", dispatchUrmaKernel, "udmaIssueQp0Buf");
     Contains("URMA dispatch kernel", dispatchUrmaKernel, "udmaIssueQp1Buf");
+    Excludes("URMA dispatch Host", dispatchUrmaHost,
+        "DispatchPeerWqesFitSq(routeCount");
+    Excludes("URMA dispatch Host", dispatchUrmaHost,
+        "routeCount <= static_cast<uint64_t>(INT16_MAX) + 1U");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
-        "uint32_t completionCount;");
+        "kFullUbBytes = 216U * 1024U");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
-        "state.outstanding = state.head - state.tail;");
+        "kRouteSelectChunkElements = 8192U");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
-        "state.completionCount += 1U;");
+        "kLocalCopyTileBytes = 8U * 1024U");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
-        "DispatchGroupedBatchNeedsCompletion(batchCount)");
+        "DispatchLocalCopyPipeline");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
-        "routeId - context->routePlanStart");
+        "InitDispatchLocalCopyPipeline(localCopyPipeline,");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
-        "DispatchRouteTileCount(");
+        "SubmitDispatchLocalCopy(localCopyPipeline,");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
-        "useVectorSlotSelect && !groupedPeerMode");
+        "DrainDispatchLocalCopyPipeline();");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
-        "LoadDispatchPlanStatus(planStatus, relayLocal)");
+        "LoadDispatchRouteChunk");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
-        "SyncFunc<AscendC::HardEvent::MTE2_S>()");
-    CheckOrdered("URMA dispatch signal publication", dispatchUrmaKernel, {
-        "PublishDispatchSignalSource(",
-        "signalLocal.SetValue(",
-        "SyncFunc<AscendC::HardEvent::S_MTE3>()",
-        "AscendC::DataCopyPad(signalGlobal, signalLocal, copyOut)",
-        "SyncFunc<AscendC::HardEvent::MTE3_S>()",
-        "TileXR::UDMACleanCacheLines(",
+        "singleRouteChunkCached");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "preparedPeerPathActive");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "DispatchWqeOperatorContext");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "DispatchWqePeerContext");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "DispatchPrefillOperatorWqesVf");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "DispatchPatchWriteWqePeerFieldsVf");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "DispatchPatchWriteWqeBatchVf");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "TracePrefillDispatchOperatorWqes(");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "TracePrefillDispatchPeerWqes(");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "operatorWqePrefillReady = TracePrefillDispatchOperatorWqes(");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "const bool incomingAlreadyWaited =");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "previousPeer.targetRank == previousIncomingPeer");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "previousPeer.issuePhase == group - 1U");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "(!incomingAlreadyWaited &&");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "magic, relayLocal);");
+    Contains("URMA dispatch credit QP ownership", dispatchUrmaKernel,
+        "static_cast<uint32_t>(blockIdx), physicalQp[0], rank,");
+    Contains("URMA dispatch credit QP ownership", dispatchUrmaKernel,
+        "args, wqeLocal, peer, physicalQpIdx,");
+    Excludes("URMA dispatch credit QP ownership", dispatchUrmaKernel,
+        "args, wqeLocal, peer, 0U,");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "magic, udmaIssueQp0Local);");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "ReserveDispatchPeerChunkSq");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "state.stagedWqeCount += batchCount");
+    CheckOrdered("URMA dispatch shared-QP credit ordering", dispatchUrmaKernel, {
+        "if (previousPeerValid) {",
+        "TraceDrainDispatchPeerFinalCq(previousPeer,",
+        "previousPeerValid = false;",
+        "const bool published = PublishDispatchPeerCredit(",
     });
-    CheckOrdered("URMA dispatch completion flag cache invalidation",
-        dispatchUrmaKernel, {
-            "LoadCompletionFlag(",
-            "TileXR::UDMACleanCacheLines(",
-            "AscendC::PipeBarrier<PIPE_ALL>()",
-            "return flag[0]",
-        });
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "DispatchPayloadWqesPerRoute(hasWeight)");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "context->routePlanStart");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "context->routePlanStart + routeInChunk");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "dstValues[routeInChunk]");
     Excludes("URMA dispatch kernel", dispatchUrmaKernel,
-        "AscendC::DataCopyPad(relayLocal, flagGlobal, copyIn, padIn)");
-    CheckOrdered("URMA dispatch credit cache invalidation",
-        dispatchUrmaKernel, {
-            "LoadDispatchCredit(",
-            "reinterpret_cast<__gm__ uint8_t *>(credit)",
-            "SyncFunc<AscendC::HardEvent::S_MTE2>()",
-            "AscendC::DataCopy(creditLocal, creditGlobal,",
-            "SyncFunc<AscendC::HardEvent::MTE2_S>()",
-        });
-    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
-        "signalSource[qpIdx] = expectedFlag");
-    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
-        "AppendDispatchSignalWqe");
-    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
-        "InvalidateDispatchInboundCache");
-    Excludes("URMA dispatch kernel", dispatchUrmaKernel, "state.wqeCount");
-    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
-        "state.completionCount += batchCount");
+        "dstValues[routeId - context->routePlanStart]");
     Contains("URMA dispatch Host", dispatchUrmaHost,
         "DispatchPeerWqesStreamable");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "state.stagedWqeCount = batchCount");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "state.doorbellPending != 0U");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "DispatchBuildWriteWqeBatchVf");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "trace.base == nullptr ? 0U");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "kDispatchTraceWqeBuild");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "kDispatchTraceSqPublish");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "kDispatchTraceDoorbell");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "kDispatchTraceUdmaExecute");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "kDispatchTraceCreditWaitMte2");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "kDispatchTraceCreditPublishMte3");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "UDMAPutNbiOnQp<uint64_t>");
     Excludes("URMA dispatch Host", dispatchUrmaHost,
-        "DispatchPeerWqesFitSq");
+        "TILEXR_ENABLE_CREDIT_IPC");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "args->creditMems");
+    Contains("Dispatch trace", dispatchTrace, "DispatchTraceLayout");
+    Contains("Dispatch trace", dispatchTrace, "sizeof(DispatchTraceEvent) == 64U");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "if (batchInitialized)");
     Excludes("URMA dispatch kernel", dispatchUrmaKernel, "<<<");
     Contains("combine CMake", combineCmake, "add_library(tilexr-moonep-combine SHARED");
     Contains("combine CMake", combineCmake, "TILEXR_MOONEP_COMBINE_KERNEL_EMBED_CPP");

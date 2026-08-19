@@ -83,6 +83,19 @@ class TileXRMoonEPPlanningArgsV1(ctypes.Structure):
     ]
 
 
+class TileXRMoonEPDispatchTraceV1(ctypes.Structure):
+    _fields_ = [
+        ("structSize", ctypes.c_uint32),
+        ("abiVersion", ctypes.c_uint32),
+        ("buffer", ctypes.c_void_p),
+        ("bufferBytes", ctypes.c_uint64),
+        ("iteration", ctypes.c_uint32),
+        ("iterationCount", ctypes.c_uint32),
+        ("eventCapacity", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+    ]
+
+
 class TileXRMoonEPDispatchArgsV1(ctypes.Structure):
     _fields_ = [
         ("structSize", ctypes.c_uint32),
@@ -96,6 +109,7 @@ class TileXRMoonEPDispatchArgsV1(ctypes.Structure):
         ("flags", ctypes.c_uint64),
         ("registeredWorkspace", ctypes.c_void_p),
         ("registeredWorkspaceBytes", ctypes.c_uint64),
+        ("trace", ctypes.POINTER(TileXRMoonEPDispatchTraceV1)),
     ]
 
 

@@ -145,6 +145,111 @@ void TestGroupedSchedule()
     CHECK_EQ(TileXRMoonEp::DispatchGroupedPeerWorkCount(128, 16U, 64U), 2U);
 }
 
+void TestSplit128GroupedSchedule()
+{
+    constexpr int64_t expectedRank0[8][16] = {
+        {1, 63, 2, 62, 3, 61, 4, 60,
+            64, 96, 65, 127, 66, 126, 67, 125},
+        {5, 59, 6, 58, 7, 57, 8, 56,
+            68, 124, 69, 123, 70, 122, 71, 121},
+        {9, 55, 10, 54, 11, 53, 12, 52,
+            72, 120, 73, 119, 74, 118, 75, 117},
+        {13, 51, 14, 50, 15, 49, 16, 48,
+            76, 116, 77, 115, 78, 114, 79, 113},
+        {17, 47, 18, 46, 19, 45, 20, 44,
+            80, 112, 81, 111, 82, 110, 83, 109},
+        {21, 43, 22, 42, 23, 41, 24, 40,
+            84, 108, 85, 107, 86, 106, 87, 105},
+        {25, 39, 26, 38, 27, 37, 28, 36,
+            88, 104, 89, 103, 90, 102, 91, 101},
+        {29, 35, 30, 34, 31, 33, 32, -1,
+            92, 100, 93, 99, 94, 98, 95, 97},
+    };
+    for (uint32_t group = 0U; group < 8U; ++group) {
+        for (uint32_t lane = 0U; lane < 16U; ++lane) {
+            CHECK_EQ(TileXRMoonEp::DispatchGroupedPeer(
+                0, 128, group, lane, 16U), expectedRank0[group][lane]);
+        }
+    }
+
+    for (int64_t rank = 0; rank < 128; ++rank) {
+        const int64_t localHalf = rank / 64;
+        std::vector<int32_t> peerGroups(128U, -1);
+        for (uint32_t group = 0U; group < 8U; ++group) {
+            uint32_t localCount = 0U;
+            uint32_t remoteCount = 0U;
+            for (uint32_t lane = 0U; lane < 16U; ++lane) {
+                const int64_t peer = TileXRMoonEp::DispatchGroupedPeer(
+                    rank, 128, group, lane, 16U);
+                CHECK_EQ(TileXRMoonEp::DispatchGroupedNextCreditPeer(
+                    rank, 128, group, lane, 16U),
+                    group < 7U ? TileXRMoonEp::DispatchGroupedPeer(
+                        rank, 128, group + 1U, lane, 16U) : -1);
+                if (peer < 0) {
+                    CHECK_EQ(group, 7U);
+                    CHECK_EQ(lane, 7U);
+                    continue;
+                }
+                CHECK_EQ(peerGroups[static_cast<size_t>(peer)], -1);
+                peerGroups[static_cast<size_t>(peer)] =
+                    static_cast<int32_t>(group);
+                if (peer / 64 == localHalf) {
+                    ++localCount;
+                } else {
+                    ++remoteCount;
+                }
+            }
+            CHECK_EQ(localCount, group < 7U ? 8U : 7U);
+            CHECK_EQ(remoteCount, 8U);
+        }
+        for (int64_t peer = 0; peer < 128; ++peer) {
+            if (peer == rank) {
+                CHECK_EQ(peerGroups[static_cast<size_t>(peer)], -1);
+                continue;
+            }
+            CHECK_TRUE(peerGroups[static_cast<size_t>(peer)] >= 0);
+            int32_t reverseGroup = -1;
+            for (uint32_t group = 0U; group < 8U; ++group) {
+                for (uint32_t lane = 0U; lane < 16U; ++lane) {
+                    if (TileXRMoonEp::DispatchGroupedPeer(
+                            peer, 128, group, lane, 16U) == rank) {
+                        reverseGroup = static_cast<int32_t>(group);
+                    }
+                }
+            }
+            CHECK_EQ(reverseGroup, peerGroups[static_cast<size_t>(peer)]);
+        }
+    }
+
+    for (uint32_t coreCount : {16U, 32U, 64U}) {
+        uint32_t sameCorePreviousWaitCount = 0U;
+        const uint32_t workCount =
+            TileXRMoonEp::DispatchGroupedPeerWorkCount(128, 16U, coreCount);
+        for (uint32_t core = 0U; core < coreCount; ++core) {
+            int64_t previousPeer = -1;
+            uint32_t previousGroup = UINT32_MAX;
+            for (uint32_t work = 0U; work < workCount; ++work) {
+                uint32_t group = UINT32_MAX;
+                uint32_t lane = UINT32_MAX;
+                const int64_t peer = TileXRMoonEp::DispatchGroupedPeerForCore(
+                    0, 128, 16U, core, coreCount, work, group, lane);
+                if (peer < 0) {
+                    continue;
+                }
+                if (group != 0U &&
+                    previousPeer == TileXRMoonEp::DispatchGroupedPeer(
+                        0, 128, group - 1U, lane, 16U) &&
+                    previousGroup == group - 1U) {
+                    ++sameCorePreviousWaitCount;
+                }
+                previousPeer = peer;
+                previousGroup = group;
+            }
+        }
+        CHECK_EQ(sameCorePreviousWaitCount, coreCount == 16U ? 111U : 0U);
+    }
+}
+
 void TestCreditContract()
 {
     CHECK_EQ(TileXRMoonEp::kDispatchCreditStrideBytes, UINT64_C(512));
@@ -178,6 +283,13 @@ void TestCreditContract()
     CHECK_EQ(TileXRMoonEp::DispatchCreditEntryOffset(7U), UINT64_C(3584));
     CHECK_EQ(TileXRMoonEp::DispatchCreditEntryOffset(
         static_cast<uint32_t>(TileXR::TILEXR_MAX_RANK_SIZE)), UINT64_MAX);
+    CHECK_EQ(TileXRMoonEp::DispatchCreditSourceOffset(0U, 0U), UINT64_C(0));
+    CHECK_EQ(TileXRMoonEp::DispatchCreditSourceOffset(1U, 0U), UINT64_C(1024));
+    CHECK_EQ(TileXRMoonEp::DispatchCreditSourceOffset(63U, 15U),
+        TileXRMoonEp::kDispatchCreditSourceBytes -
+            TileXRMoonEp::kDispatchCreditSourceStrideBytes);
+    CHECK_EQ(TileXRMoonEp::DispatchCreditSourceOffset(64U, 0U), UINT64_MAX);
+    CHECK_EQ(TileXRMoonEp::DispatchCreditSourceOffset(0U, 16U), UINT64_MAX);
     CHECK_TRUE(!TileXRMoonEp::DispatchCreditRequired(0U));
     CHECK_TRUE(TileXRMoonEp::DispatchCreditRequired(1U));
     CHECK_TRUE(!TileXRMoonEp::DispatchCreditReady(0U, 0U));
@@ -401,6 +513,8 @@ void TestDualQpSplit()
     }
     CHECK_EQ(TileXRMoonEp::DispatchQpRouteCount(16U, 0U, 0U), 12U);
     CHECK_EQ(TileXRMoonEp::DispatchQpRouteCount(16U, 0U, 1U), 4U);
+    CHECK_EQ(TileXRMoonEp::DispatchQpRouteCount(16384U, 0U, 0U), 12288U);
+    CHECK_EQ(TileXRMoonEp::DispatchQpRouteCount(16384U, 0U, 1U), 4096U);
     CHECK_EQ(TileXRMoonEp::DispatchQpSelectedIndex(0U, 0U, 1U), 3U);
     CHECK_EQ(TileXRMoonEp::DispatchQpSelectedIndex(3U, 0U, 1U), 15U);
     CHECK_EQ(TileXRMoonEp::DispatchQpSelectedIndex(0U, 0U, 2U), UINT32_MAX);
@@ -412,6 +526,7 @@ int main()
 {
     TestSchedule();
     TestGroupedSchedule();
+    TestSplit128GroupedSchedule();
     TestCreditContract();
     TestDestinationDecode();
     TestContiguousRanges();

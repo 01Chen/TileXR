@@ -13,6 +13,9 @@
 
 namespace TileXRMoonEp {
 
+constexpr int64_t kDispatchSplitRankSize = 128;
+constexpr int64_t kDispatchSplitHalfRankSize = 64;
+
 TILEXR_MOONEP_SCHEDULE_INLINE void DispatchContiguousRange(
     uint64_t itemCount, uint32_t partCount, uint32_t part,
     uint64_t &start, uint64_t &end)
@@ -80,6 +83,61 @@ TILEXR_MOONEP_SCHEDULE_INLINE uint32_t DispatchGroupedGroupCount(
         (remotePeerCount % groupWidth == 0U ? 0U : 1U));
 }
 
+TILEXR_MOONEP_SCHEDULE_INLINE int64_t DispatchSplit128RingPeer(
+    int64_t halfBase, int64_t center, int64_t offset)
+{
+    const int64_t index =
+        (center + offset + kDispatchSplitHalfRankSize) %
+        kDispatchSplitHalfRankSize;
+    return halfBase + index;
+}
+
+TILEXR_MOONEP_SCHEDULE_INLINE int64_t DispatchGroupedPeerSplit128(
+    int64_t rank, uint32_t group, uint32_t lane)
+{
+    constexpr uint32_t splitGroupWidth = 16U;
+    constexpr uint32_t halfGroupWidth = splitGroupWidth / 2U;
+    constexpr uint32_t splitGroupCount = 8U;
+    if (rank < 0 || rank >= kDispatchSplitRankSize ||
+        group >= splitGroupCount || lane >= splitGroupWidth) {
+        return -1;
+    }
+
+    const int64_t localHalfBase = rank < kDispatchSplitHalfRankSize ?
+        0 : kDispatchSplitHalfRankSize;
+    const int64_t remoteHalfBase =
+        kDispatchSplitHalfRankSize - localHalfBase;
+    const int64_t center = rank - localHalfBase;
+
+    if (lane < halfGroupWidth) {
+        const uint32_t ordinal = group * halfGroupWidth + lane;
+        if (ordinal >= static_cast<uint32_t>(
+                kDispatchSplitHalfRankSize - 1)) {
+            return -1;
+        }
+        const int64_t distance = static_cast<int64_t>(ordinal / 2U + 1U);
+        const int64_t offset = ordinal % 2U == 0U ? distance : -distance;
+        return DispatchSplit128RingPeer(localHalfBase, center, offset);
+    }
+
+    const uint32_t remoteLane = lane - halfGroupWidth;
+    int64_t offset = 0;
+    if (group == 0U) {
+        if (remoteLane == 1U) {
+            offset = kDispatchSplitHalfRankSize / 2;
+        } else if (remoteLane >= 2U) {
+            const uint32_t ordinal = remoteLane - 2U;
+            const int64_t distance = static_cast<int64_t>(ordinal / 2U + 1U);
+            offset = ordinal % 2U == 0U ? distance : -distance;
+        }
+    } else {
+        const int64_t distance = static_cast<int64_t>(
+            group * (halfGroupWidth / 2U) + remoteLane / 2U);
+        offset = remoteLane % 2U == 0U ? distance : -distance;
+    }
+    return DispatchSplit128RingPeer(remoteHalfBase, center, offset);
+}
+
 TILEXR_MOONEP_SCHEDULE_INLINE int64_t DispatchGroupedPeer(
     int64_t rank, int64_t rankSize, uint32_t group, uint32_t lane,
     uint32_t groupWidth)
@@ -88,6 +146,9 @@ TILEXR_MOONEP_SCHEDULE_INLINE int64_t DispatchGroupedPeer(
     if (rank < 0 || rank >= rankSize || group >= groupCount ||
         lane >= groupWidth) {
         return -1;
+    }
+    if (rankSize == kDispatchSplitRankSize && groupWidth == 16U) {
+        return DispatchGroupedPeerSplit128(rank, group, lane);
     }
     const uint32_t halfWidth = groupWidth / 2U;
     const uint32_t index = lane < halfWidth ? lane : lane - halfWidth;

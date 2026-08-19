@@ -29,6 +29,10 @@ struct MoonEpDispatchUrmaLayout {
     uint64_t commonOffset = 0;
     uint64_t completionFlagsOffset = 0;
     uint64_t completionFlagsBytes = 0;
+    uint64_t creditOffset = 0;
+    uint64_t creditBytes = 0;
+    uint64_t creditSourceOffset = 0;
+    uint64_t creditSourceBytes = 0;
     uint64_t signalOffset = 0;
     uint64_t signalBytes = 0;
     uint64_t hiddenProfileOffset = 0;

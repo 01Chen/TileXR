@@ -309,14 +309,20 @@ extern "C" int TileXRMoonEpPlanningV1(const TileXRMoonEpPlanningArgsV1 *args,
 extern "C" int TileXRMoonEpDispatchV1(const TileXRMoonEpDispatchArgsV1 *args,
     aclrtStream stream)
 {
-    const std::size_t baseArgsBytes = offsetof(
+    const std::size_t legacyArgsBytes = offsetof(
         TileXRMoonEpDispatchArgsV1, registeredWorkspace);
-    if (args != nullptr && args->structSize >= sizeof(*args) &&
+    const std::size_t urmaArgsBytes = offsetof(
+        TileXRMoonEpDispatchArgsV1, trace);
+    if (args != nullptr && args->structSize >= urmaArgsBytes &&
         (args->registeredWorkspace != nullptr ||
             args->registeredWorkspaceBytes != 0)) {
         return TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV1(args, stream);
     }
-    if (args != nullptr && args->structSize < baseArgsBytes) {
+    if (args != nullptr && args->structSize >= sizeof(*args) &&
+        args->trace != nullptr) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+    if (args != nullptr && args->structSize < legacyArgsBytes) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     return TileXRMoonEp::TileXRMoonEpRunDispatchV1(args, stream);

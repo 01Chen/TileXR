@@ -22,6 +22,7 @@ from tilexr_moonep.abi import (
     TileXRMoonEPCombineArgsV1,
     TileXRMoonEPDispatchArgsV1,
     TileXRMoonEPDispatchArgsV2,
+    TileXRMoonEPDispatchTraceV1,
     TileXRMoonEPPlanV1,
     TileXRMoonEPPlanningArgsV1,
     TileXRMoonEPPrefetchWeightArgsV1,
@@ -487,8 +488,9 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(TileXRMoonEPTensorV1), 64)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanV1), 120)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanningArgsV1), 80)
-        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV1), 80)
-        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV2), 80)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchTraceV1), 40)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV1), 88)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV2), 88)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPrefetchWeightArgsV1), 56)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPCombineArgsV1), 72)
         self.assertEqual(TileXRMoonEPCombineArgsV1.dstLocal.offset, 24)
@@ -511,6 +513,8 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(TileXRMoonEPReduceGradWorkspaceInfoV2.chunkCounts.offset, 88)
         self.assertEqual(TileXRMoonEPReduceGradPrepareArgsV2.sources.offset, 48)
         self.assertEqual(TileXRMoonEPReduceGradArgsV2.sources.offset, 48)
+        self.assertEqual(TileXRMoonEPDispatchArgsV1.trace.offset, 80)
+        self.assertEqual(TileXRMoonEPDispatchArgsV2.trace.offset, 80)
 
     def test_invalid_combine_version_fails_before_library_load(self):
         loader = FakeCDLLLoader()

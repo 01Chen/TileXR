@@ -15,6 +15,7 @@ from .abi import (
     TileXRMoonEPDType,
     TileXRMoonEPCombineArgsV1,
     TileXRMoonEPDispatchArgsV2,
+    TileXRMoonEPDispatchTraceV1,
     TileXRMoonEPPlanV1,
     TileXRMoonEPPlanningArgsV1,
     TileXRMoonEPPrefetchWeightArgsV1,
@@ -676,6 +677,11 @@ class TileXRMoonEPRuntime:
         inter_rank_sync: bool = True,
         registered_workspace: int | None = None,
         registered_workspace_bytes: int = 0,
+        trace_buffer: int | None = None,
+        trace_buffer_bytes: int = 0,
+        trace_iteration: int = 0,
+        trace_iteration_count: int = 0,
+        trace_event_capacity: int = 0,
     ) -> None:
         if not inter_rank_sync:
             raise NotImplementedError(
@@ -690,6 +696,18 @@ class TileXRMoonEPRuntime:
             raise ValueError("Dispatch V2 requires the registered Dispatch workspace")
         if build_dedup:
             raise ValueError("Dispatch V2 does not support the legacy build_dedup flag")
+        trace_enabled = trace_buffer is not None
+        if trace_enabled != (trace_buffer_bytes > 0):
+            raise ValueError("trace_buffer and trace_buffer_bytes must be provided together")
+        if trace_enabled and not (
+            trace_iteration_count > 0
+            and 0 <= trace_iteration < trace_iteration_count
+            and trace_event_capacity > 0
+        ):
+            raise ValueError(
+                "trace dimensions require iteration_count > iteration >= 0 and "
+                "event_capacity > 0"
+            )
         plan_v1 = self._plan_v1(context, plan)
         hidden_sh = make_tensor_v1(input_tensor)
         hidden_nvsh = make_tensor_v1(output_tensor)
@@ -709,6 +727,18 @@ class TileXRMoonEPRuntime:
         args.flags = TILEXR_MOONEP_FLAG_RESET_STATUS
         args.registeredWorkspace = void_p(registered_workspace)
         args.registeredWorkspaceBytes = int(registered_workspace_bytes)
+        trace = None
+        if trace_enabled:
+            trace = initialize_struct(TileXRMoonEPDispatchTraceV1())
+            trace.buffer = void_p(trace_buffer)
+            trace.bufferBytes = int(trace_buffer_bytes)
+            trace.iteration = int(trace_iteration)
+            trace.iterationCount = int(trace_iteration_count)
+            trace.eventCapacity = int(trace_event_capacity)
+            trace.reserved = 0
+            args.trace = ctypes.pointer(trace)
+        else:
+            args.trace = None
         ret = self._moonep_lib.TileXRMoonEpDispatchV2(
             ctypes.byref(args), void_p(stream_ptr)
         )
