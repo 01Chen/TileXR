@@ -24,7 +24,7 @@ int registrationCalls = 0;
 int launchCalls = 0;
 uint32_t capturedBlockDim = 0;
 std::size_t capturedArgsSize = 0;
-uint64_t capturedArgs[18] = {};
+uint64_t capturedArgs[29] = {};
 rtTaskCfgInfo_t capturedCfg {};
 
 void Check(bool condition, const char *message)
@@ -70,7 +70,7 @@ TileXRMoonEp::CombineV2Params ValidParams(uint64_t *activeOutputOffset)
     params.h = 3584;
     params.topK = 16;
     params.nvS = 128;
-    params.aivCoreNum = 32;
+    params.aivCoreNum = TileXRMoonEp::kMoonEpCombineV2CoreCount;
     params.activeOutputOffset = activeOutputOffset;
     params.dtype = TILEXR_MOONEP_DTYPE_BFLOAT16;
     params.reduceHidden = true;
@@ -84,7 +84,8 @@ TileXRMoonEp::CombineV2LaunchContext ValidContext()
     context.devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x4000});
     context.layout.scratchOffset[0] = 4096;
     context.layout.scratchOffset[1] = 8192;
-    context.layout.outputOffset = 12288;
+    context.layout.collectiveStatusOffset = 20480;
+    context.layout.outputOffset = 24576;
     context.layout.rowBytes = 7168;
     context.magic = 1;
     return context;
@@ -102,17 +103,24 @@ void TestConfiguresDynamicUb()
         TileXR::TILEXR_SUCCESS, "configured launch");
     Check(registrationCalls == 1 && launchCalls == 1,
         "configured launch did not reach Runtime");
-    Check(capturedBlockDim == params.aivCoreNum,
-        "configured launch did not use the requested block dimension");
+    Check(capturedBlockDim == TileXRMoonEp::kMoonEpCombineV2CoreCount,
+        "configured launch did not use the fixed 16-block dimension");
     Check(capturedCfg.schemMode == 1,
         "configured launch did not preserve batch scheduling mode");
     Check(capturedCfg.localMemorySize == static_cast<uint32_t>(kA5UbBytes),
         "configured launch did not pass the device UB size");
     Check(capturedArgsSize == sizeof(capturedArgs),
         "configured launch used the wrong kernel ABI size");
-    Check(capturedArgs[10] == context.layout.outputOffset &&
-        capturedArgs[15] == context.layout.rowBytes && capturedArgs[16] == 1U,
-        "configured launch did not pass reduction layout arguments");
+    Check(capturedArgs[7] == 0U && capturedArgs[10] == 0U &&
+        capturedArgs[11] == 0U &&
+        capturedArgs[12] == context.layout.collectiveStatusOffset &&
+        capturedArgs[13] == context.layout.outputOffset &&
+        capturedArgs[18] == context.layout.rowBytes &&
+        capturedArgs[19] == 1U &&
+        capturedArgs[20] == static_cast<uint64_t>(context.magic) &&
+        capturedArgs[21] == 0U && capturedArgs[22] == 0U &&
+        capturedArgs[23] == 0U && capturedArgs[28] == 0U,
+        "configured launch did not pass kernel arguments");
     Check(activeOutputOffset == context.layout.scratchOffset[1],
         "configured launch did not publish the active epoch");
 }
@@ -183,7 +191,7 @@ rtError_t rtKernelLaunchWithFlagV2(const void *, uint32_t blockDim,
         if (argsInfo->args != nullptr && argsInfo->argsSize ==
                 sizeof(capturedArgs)) {
             const uint64_t *args = static_cast<const uint64_t *>(argsInfo->args);
-            for (std::size_t index = 0; index < 18U; ++index) {
+            for (std::size_t index = 0; index < 29U; ++index) {
                 capturedArgs[index] = args[index];
             }
         }

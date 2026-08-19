@@ -4,6 +4,7 @@
 
 #include "combine_v2_layout.h"
 #include "combine_v2_profile.h"
+#include "comm_args.h"
 #include "tilexr_moonep.h"
 
 namespace {
@@ -30,11 +31,11 @@ void CheckStatus(int actual, int expected, const char *message)
 void TestTargetLayout()
 {
     using namespace TileXRMoonEp;
-    Check(sizeof(MoonEpCombineV2ProfileRecord) == 384U,
+    Check(sizeof(MoonEpCombineV2ProfileRecord) == 448U,
         "profile record size mismatch");
     Check(kMoonEpCombineV2ProfileTimePointCount == 22U,
         "profile point count mismatch");
-    Check(kMoonEpCombineV2ProfileMetricCount == 8U,
+    Check(kMoonEpCombineV2ProfileMetricCount == 10U,
         "profile metric count mismatch");
 
     CombineV2Layout layout {};
@@ -52,16 +53,20 @@ void TestTargetLayout()
     Check(layout.scratchOffset[1] == layout.scratchOffset[0] + layout.expertBytes,
         "scratch epoch 1 offset mismatch");
     Check(layout.doneBytes == 32768U, "done bytes mismatch");
-    Check(layout.grantBytes == 262144U, "grant bytes mismatch");
-    Check(layout.controlSourceOffset == 2818873344ULL,
+    Check(layout.controlSourceOffset == 2818612224ULL,
         "control source offset mismatch");
-    Check(layout.failureOffset == 2818875392ULL,
+    Check(layout.failureOffset == 2818614272ULL,
         "failure offset mismatch");
     Check(layout.controlSourceBytes == 2048U, "control source bytes mismatch");
     Check(layout.failureBytes == 2048U, "failure bytes mismatch");
-    Check(layout.outputOffset == 2818877440ULL,
+    Check(layout.collectiveStatusOffset == 2818616320ULL,
+        "collective status offset mismatch");
+    Check(layout.collectiveStatusBytes == 2048U,
+        "collective status bytes mismatch");
+    Check(layout.outputOffset == 2818618368ULL,
         "target output offset mismatch");
-    Check(layout.outputOffset == layout.failureOffset + layout.failureBytes,
+    Check(layout.outputOffset ==
+            layout.collectiveStatusOffset + layout.collectiveStatusBytes,
         "output offset mismatch");
     Check(layout.outputBytes == 58720256U, "output bytes mismatch");
     Check(layout.totalBytes == 2879389696ULL, "target total bytes mismatch");
@@ -78,7 +83,8 @@ void TestSmallAndInvalidLayouts()
     Check(layout.totalBytes == 4194304U, "small total bytes mismatch");
     Check(layout.totalBytes % kCombineV2RegistrationAlignmentBytes == 0U,
         "workspace is not registration aligned");
-    Check(layout.outputOffset >= layout.failureOffset + layout.failureBytes &&
+    Check(layout.outputOffset >=
+            layout.collectiveStatusOffset + layout.collectiveStatusBytes &&
         layout.outputOffset + layout.outputBytes <= layout.totalBytes,
         "small output overlaps control workspace");
 
@@ -104,11 +110,49 @@ void TestSmallAndInvalidLayouts()
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "null layout");
 }
 
+void TestWeightMemoryLayout()
+{
+    using namespace TileXRMoonEp;
+    CombineV2WeightLayout layout {};
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(131072, 64, &layout),
+        TILEXR_MOONEP_SUCCESS, "weight memory layout");
+    Check(layout.recordOffset == 0U &&
+        layout.recordEpochBytes == 131072U * 16U &&
+        layout.recordBytes == 2U * layout.recordEpochBytes,
+        "weight record layout mismatch");
+    Check(layout.doneOffset == layout.recordBytes &&
+        layout.doneEpochBytes == 64U * 64U &&
+        layout.doneBytes == 2U * layout.doneEpochBytes,
+        "weight done layout mismatch");
+    Check(layout.totalBytes == layout.doneOffset + layout.doneBytes,
+        "weight total layout mismatch");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(129, 8, &layout),
+        TILEXR_MOONEP_SUCCESS, "unaligned weight memory layout");
+    Check(layout.recordEpochBytes == 2112U &&
+        layout.recordBytes == 4224U && layout.doneOffset == 4224U &&
+        layout.doneOffset % 64U == 0U &&
+        layout.doneEpochBytes == 512U && layout.doneBytes == 1024U,
+        "weight record alignment mismatch");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(0, 64, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "zero weight slots");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(128, 0, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "zero weight world");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(128, 129, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "oversized weight world");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(
+        static_cast<int64_t>(TileXR::IPC_BUFF_MAX_SIZE / 16U), 128, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
+        "weight layout beyond IPC capacity");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(INT64_MAX, 128, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "overflowing weight layout");
+}
+
 } // namespace
 
 int main()
 {
     TestTargetLayout();
     TestSmallAndInvalidLayouts();
+    TestWeightMemoryLayout();
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

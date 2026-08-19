@@ -8,7 +8,6 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
-#include <numeric>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -20,6 +19,7 @@
 #include <unistd.h>
 
 #include "acl/acl.h"
+#include "combine_v2_host.h"
 #include "combine_v2_profile.h"
 #include "combine_v2_schedule.h"
 #include "tilexr_api.h"
@@ -30,7 +30,7 @@ namespace {
 
 constexpr int kDeviceCount = 8;
 constexpr int kDefaultCommDomain = 141;
-constexpr int64_t kH = 3584;
+constexpr int64_t kDefaultHiddenSize = 3584;
 constexpr int64_t kTopK = 16;
 constexpr int kDefaultExpertCount = 64;
 constexpr uint32_t kAivCoreNum = 16;
@@ -47,6 +47,8 @@ const char *const kProfileMetricNames[
     "remote_descriptor_us",
     "remote_wqe_build_us",
     "remote_submit_us",
+    "credit_wait_us",
+    "credit_publish_us",
 };
 
 struct HostPort {
@@ -59,13 +61,14 @@ struct Options {
     int warmup = 20;
     int iterations = 80;
     int experts = kDefaultExpertCount;
+    int64_t hiddenSize = kDefaultHiddenSize;
     int commDomain = kDefaultCommDomain;
     int rank = -1;
     int worldSize = 0;
     int device = -1;
-    bool skipIterationBarriers = false;
     bool profile = false;
-    bool allowSelfOnlyFailure = false;
+    bool reduceHidden = false;
+    bool fusedWeight = false;
 };
 
 struct ProfileSample {
@@ -75,6 +78,14 @@ struct ProfileSample {
         TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount> timePoint {};
     std::array<uint64_t,
         TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount> metric {};
+    bool fullmesh = false;
+    uint32_t fullmeshStep = 0U;
+    uint32_t fullmeshPeer = 0U;
+    uint32_t fullmeshSuccessor = 0U;
+    uint32_t fullmeshLogicalQp = 0U;
+    int64_t fullmeshWqeBuildEnd = 0;
+    int64_t fullmeshSubmitEnd = 0;
+    int64_t fullmeshCqSuccess = 0;
 };
 
 enum class OutputCheckResult {
@@ -110,15 +121,16 @@ void Usage(std::ostream &out, const char *program)
         << "  --warmup N             Warmup launches per batch size (default: 20)\n"
         << "  --iterations N         Timed launches per batch size (default: 80)\n"
         << "  --experts N            Total expert count (default: 64)\n"
+        << "  --hidden-size N        Hidden size H (default: 3584)\n"
         << "  --comm-domain N        Shared-QP communication domain (default: 141)\n"
         << "  --rank N               Global rank (required)\n"
         << "  --world-size N         Global rank count (required)\n"
         << "  --device N             Local device id (default: rank modulo 8)\n"
         << "  --skip-iteration-barriers\n"
-        << "                         Skip host barriers between warmup/timed launches\n"
+        << "                         Deprecated no-op; launches are always continuous\n"
         << "  --profile              Capture per-AIV kernel cycle timestamps\n"
-        << "  --allow-self-only-failure\n"
-        << "                         Continue timing when only Self-copy validation fails\n"
+        << "  --reduce-hidden        Include BF16 TopK hidden reduction in the kernel\n"
+        << "  --fused-weight         Transfer and validate FP32 route weights in the same launch\n"
         << "  --help                 Show this help\n";
 }
 
@@ -181,15 +193,18 @@ bool ParseOptions(int argc, char **argv, Options *options, bool *showHelp,
             return true;
         }
         if (argument == "--skip-iteration-barriers") {
-            options->skipIterationBarriers = true;
             continue;
         }
         if (argument == "--profile") {
             options->profile = true;
             continue;
         }
-        if (argument == "--allow-self-only-failure") {
-            options->allowSelfOnlyFailure = true;
+        if (argument == "--reduce-hidden") {
+            options->reduceHidden = true;
+            continue;
+        }
+        if (argument == "--fused-weight") {
+            options->fusedWeight = true;
             continue;
         }
         if (index + 1 >= argc) {
@@ -232,6 +247,14 @@ bool ParseOptions(int argc, char **argv, Options *options, bool *showHelp,
                 return false;
             }
             options->experts = static_cast<int>(parsed);
+        } else if (argument == "--hidden-size") {
+            int64_t parsed = 0;
+            if (!ParseInteger(value, 1, std::numeric_limits<int32_t>::max(),
+                    &parsed)) {
+                *error = "invalid hidden size: " + value;
+                return false;
+            }
+            options->hiddenSize = parsed;
         } else if (argument == "--comm-domain") {
             int64_t parsed = 0;
             if (!ParseInteger(value, 1, std::numeric_limits<int>::max(),
@@ -273,6 +296,11 @@ bool ParseOptions(int argc, char **argv, Options *options, bool *showHelp,
         *error = "--rank and --world-size must identify a valid rank";
         return false;
     }
+    if (options->fusedWeight && options->commDomain ==
+            std::numeric_limits<int>::max()) {
+        *error = "--comm-domain leaves no distinct domain for fused weight";
+        return false;
+    }
     return true;
 }
 
@@ -289,6 +317,17 @@ uint16_t SourceValue(int sourceRank)
     const float value = 1.0F + static_cast<float>(sourceRank % 16) * 0.25F +
         static_cast<float>(sourceRank / 16) * 0.0625F;
     return FloatToBfloat16(value);
+}
+
+float WeightValue(int sourceRank, int64_t sourceSlot, uint32_t generation)
+{
+    const uint32_t payload = (static_cast<uint32_t>(sourceRank) * 131071U +
+        static_cast<uint32_t>(sourceSlot) + generation * 524287U) &
+        0x007FFFFFU;
+    const uint32_t bits = 0x3F000000U | payload;
+    float value = 0.0F;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 void CheckAcl(int rank, const std::string &step, aclError status)
@@ -422,6 +461,8 @@ bool BarrierServer(int world, const HostPort &endpoint, bool localSuccess)
         }
     }
 
+    // Retire this barrier generation before any client can enter the next one.
+    close(listenFd);
     const uint8_t release = exchangeOk && globalSuccess ? 1U : 0U;
     for (const int client : clients) {
         if (!SendAll(client, &release, sizeof(release))) {
@@ -429,7 +470,6 @@ bool BarrierServer(int world, const HostPort &endpoint, bool localSuccess)
         }
         close(client);
     }
-    close(listenFd);
     return exchangeOk && globalSuccess;
 }
 
@@ -494,25 +534,82 @@ bool BarrierAll(int rank, int world, const std::string &step,
 }
 
 void LaunchCombine(int rank, void *workspace, const int32_t *dst,
-    TileXRCommPtr comm, int64_t bs, aclrtStream stream,
-    uint64_t *activeOutputOffset)
+    TileXRCommPtr comm, TileXRCommPtr weightMemoryComm, int64_t bs,
+    int64_t hiddenSize, aclrtStream stream, bool reduceHidden,
+    bool fusedWeight, const float *routeWeightsNvs, float *routeWeightsSk,
+    uint64_t reduceOutputOffset, uint64_t *activeOutputOffset)
 {
     const int64_t slots = bs * kTopK;
-    const int ret = TileXRMoonEpCombineV2(workspace, dst, comm, bs, kH,
-        kTopK, slots, kAivCoreNum, activeOutputOffset,
-        TILEXR_MOONEP_DTYPE_BFLOAT16, stream);
+    int ret = TILEXR_MOONEP_SUCCESS;
+    if (reduceHidden || fusedWeight) {
+        TileXRMoonEp::CombineV2Params params {};
+        params.registeredWorkspace = workspace;
+        params.dstLocal = dst;
+        params.comm = comm;
+        params.bs = bs;
+        params.h = hiddenSize;
+        params.topK = kTopK;
+        params.nvS = slots;
+        params.aivCoreNum = kAivCoreNum;
+        params.activeOutputOffset = activeOutputOffset;
+        params.dtype = TILEXR_MOONEP_DTYPE_BFLOAT16;
+        params.reduceHidden = reduceHidden;
+        params.weightMemoryComm = fusedWeight ? weightMemoryComm : nullptr;
+        params.routeWeightsNvs = fusedWeight ? routeWeightsNvs : nullptr;
+        params.routeWeightsSk = fusedWeight ? routeWeightsSk : nullptr;
+        params.stream = stream;
+        ret = TileXRMoonEp::TileXRMoonEpRunCombineV2(params);
+        if (ret == TILEXR_MOONEP_SUCCESS && reduceHidden) {
+            *activeOutputOffset = reduceOutputOffset;
+        }
+    } else {
+        ret = TileXRMoonEpCombineV2(workspace, dst, comm, bs,
+            hiddenSize, kTopK, slots, kAivCoreNum, activeOutputOffset,
+            TILEXR_MOONEP_DTYPE_BFLOAT16, stream);
+    }
     if (ret != TILEXR_MOONEP_SUCCESS) {
-        Abort(rank, "TileXRMoonEpCombineV2", ret);
+        Abort(rank, reduceHidden ? "TileXRMoonEpRunCombineV2 reduce" :
+            "TileXRMoonEpCombineV2", ret);
     }
 }
 
-OutputCheckResult CheckOutput(int rank, int world, int64_t bs,
-    const void *workspace,
-    uint64_t activeOutputOffset)
+bool CheckWeights(int rank, int world, int64_t bs,
+    const float *routeWeightsSk, uint32_t generation)
 {
     const int64_t slots = bs * kTopK;
-    const std::size_t outputElements = static_cast<std::size_t>(slots) *
-        static_cast<std::size_t>(kH);
+    const int64_t slotsPerRank = slots / world;
+    std::vector<float> output(static_cast<std::size_t>(slots));
+    const std::size_t bytes = output.size() * sizeof(float);
+    CheckAcl(rank, "weight output D2H copy", aclrtMemcpy(output.data(), bytes,
+        routeWeightsSk, bytes, ACL_MEMCPY_DEVICE_TO_HOST));
+    for (int64_t targetSlot = 0; targetSlot < slots; ++targetSlot) {
+        const int sourceRank = static_cast<int>(targetSlot / slotsPerRank);
+        const int64_t sourceLocalIndex = targetSlot % slotsPerRank;
+        const int64_t sourceSlot = sourceLocalIndex * world + rank;
+        const float expected = WeightValue(
+            sourceRank, sourceSlot, generation);
+        if (output[static_cast<std::size_t>(targetSlot)] != expected) {
+            std::cerr << "[rank " << rank << "] weight mismatch"
+                      << " bs=" << bs
+                      << " target_slot=" << targetSlot
+                      << " source_rank=" << sourceRank
+                      << " source_slot=" << sourceSlot
+                      << " got=" << output[static_cast<std::size_t>(targetSlot)]
+                      << " expected=" << expected << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
+OutputCheckResult CheckOutput(int rank, int world, int64_t bs,
+    int64_t hiddenSize, const void *workspace,
+    uint64_t activeOutputOffset, bool reduceHidden)
+{
+    const int64_t slots = bs * kTopK;
+    const int64_t outputRows = reduceHidden ? bs : slots;
+    const std::size_t outputElements = static_cast<std::size_t>(outputRows) *
+        static_cast<std::size_t>(hiddenSize);
     const std::size_t outputBytes = outputElements * sizeof(uint16_t);
     std::vector<uint16_t> output(outputElements);
     const void *outputDevice = static_cast<const uint8_t *>(workspace) +
@@ -520,23 +617,26 @@ OutputCheckResult CheckOutput(int rank, int world, int64_t bs,
     CheckAcl(rank, "output D2H copy", aclrtMemcpy(output.data(), outputBytes,
         outputDevice, outputBytes, ACL_MEMCPY_DEVICE_TO_HOST));
 
-    const int64_t slotsPerSourceRank = slots / world;
+    const int64_t rowsPerSourceRank = outputRows / world;
     bool selfMismatch = false;
-    for (int64_t slot = 0; slot < slots; ++slot) {
-        const int sourceRank = static_cast<int>(slot / slotsPerSourceRank);
+    for (int64_t row = 0; row < outputRows; ++row) {
+        const int sourceRank = static_cast<int>(row / rowsPerSourceRank);
         if (sourceRank == rank && selfMismatch) {
             continue;
         }
-        const uint16_t expected = SourceValue(sourceRank);
-        const std::size_t rowOffset = static_cast<std::size_t>(slot) *
-            static_cast<std::size_t>(kH);
-        for (int64_t column = 0; column < kH; ++column) {
+        const uint16_t expected = reduceHidden ? FloatToBfloat16(
+            (1.0F + static_cast<float>(sourceRank % 16) * 0.25F +
+                static_cast<float>(sourceRank / 16) * 0.0625F) *
+                    static_cast<float>(kTopK)) : SourceValue(sourceRank);
+        const std::size_t rowOffset = static_cast<std::size_t>(row) *
+            static_cast<std::size_t>(hiddenSize);
+        for (int64_t column = 0; column < hiddenSize; ++column) {
             const std::size_t index = rowOffset +
                 static_cast<std::size_t>(column);
             if (output[index] != expected) {
                 std::cerr << "[rank " << rank << "] output mismatch"
                           << " bs=" << bs
-                          << " slot=" << slot
+                          << " row=" << row
                           << " column=" << column
                           << " source_rank=" << sourceRank
                           << " got=" << output[index]
@@ -551,6 +651,54 @@ OutputCheckResult CheckOutput(int rank, int world, int64_t bs,
     }
     return selfMismatch ? OutputCheckResult::SelfOnlyFailed :
         OutputCheckResult::Passed;
+}
+
+void ReportFirstKernelFailure(int rank, const void *workspace,
+    const TileXRMoonEp::CombineV2Layout &layout)
+{
+    const std::size_t recordCount = static_cast<std::size_t>(
+        layout.failureBytes /
+        sizeof(TileXRMoonEp::MoonEpCombineV2FailureRecord));
+    std::vector<TileXRMoonEp::MoonEpCombineV2FailureRecord> records(
+        recordCount);
+    const void *failureDevice = static_cast<const uint8_t *>(workspace) +
+        layout.failureOffset;
+    CheckAcl(rank, "failure record D2H copy", aclrtMemcpy(records.data(),
+        layout.failureBytes, failureDevice, layout.failureBytes,
+        ACL_MEMCPY_DEVICE_TO_HOST));
+    const TileXRMoonEp::MoonEpCombineV2FailureRecord *selected = nullptr;
+    for (const auto &record : records) {
+        if ((record.marker & ~1U) !=
+                TileXRMoonEp::kMoonEpCombineV2FailureMarker ||
+            record.status == TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS) {
+            continue;
+        }
+        if (selected == nullptr ||
+            (selected->status ==
+                    TileXRMoonEp::MOONEP_COMBINE_V2_COLLECTIVE_STATUS_ERROR &&
+                record.status !=
+                    TileXRMoonEp::MOONEP_COMBINE_V2_COLLECTIVE_STATUS_ERROR)) {
+            selected = &record;
+        }
+    }
+    if (selected != nullptr) {
+        std::cerr << "COMBINE_V2_FAILURE"
+                  << " rank=" << rank
+                  << " status=" << selected->status
+                  << " source_rank=" << selected->rank
+                  << " core=" << selected->core
+                  << " step=" << selected->step
+                  << " peer=" << selected->peer
+                  << " lane=" << selected->lane
+                  << " qp=" << selected->qp
+                  << " cq_status=" << selected->cqStatus
+                  << " expected=" << selected->expected
+                  << " observed=" << selected->observed
+                  << std::endl;
+        return;
+    }
+    std::cerr << "COMBINE_V2_FAILURE rank=" << rank
+              << " status=unavailable" << std::endl;
 }
 
 void CaptureProfileSamples(int rank, int world, int iteration,
@@ -581,8 +729,7 @@ void CaptureProfileSamples(int rank, int world, int iteration,
             record.timePointCount !=
                 TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount ||
             record.metricCount !=
-                TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount ||
-            record.reserved != 0U) {
+                TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount) {
             Abort(rank, "profile record validation", 1);
         }
         ProfileSample sample;
@@ -603,8 +750,100 @@ void CaptureProfileSamples(int rank, int world, int iteration,
             ++metric) {
             sample.metric[metric] = record.metric[metric];
         }
+        sample.fullmeshWqeBuildEnd = record.timePoint[TileXRMoonEp::
+            MOONEP_COMBINE_V2_DIAG_FULLMESH_WQE_BUILD_END];
+        sample.fullmeshSubmitEnd = record.timePoint[TileXRMoonEp::
+            MOONEP_COMBINE_V2_DIAG_FULLMESH_SUBMIT_END];
+        sample.fullmeshCqSuccess = record.timePoint[TileXRMoonEp::
+            MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS];
+        const bool routeValid =
+            (record.reserved &
+                TileXRMoonEp::kMoonEpCombineV2ProfileRouteValid) != 0U;
+        if (!routeValid) {
+            if (record.reserved != 0U || sample.fullmeshWqeBuildEnd != 0 ||
+                sample.fullmeshSubmitEnd != 0 ||
+                sample.fullmeshCqSuccess != 0) {
+                Abort(rank, "non-Fullmesh profile validation", 1);
+            }
+        } else {
+            sample.fullmesh = true;
+            const uint32_t transport =
+                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
+                    record.reserved,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileTransportShift,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileTransportMask);
+            sample.fullmeshStep =
+                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
+                    record.reserved,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileStepShift,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileStepMask);
+            sample.fullmeshPeer =
+                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
+                    record.reserved,
+                    TileXRMoonEp::kMoonEpCombineV2ProfilePeerShift,
+                    TileXRMoonEp::kMoonEpCombineV2ProfilePeerMask);
+            sample.fullmeshSuccessor =
+                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
+                    record.reserved,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileSuccessorShift,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileSuccessorMask);
+            sample.fullmeshLogicalQp =
+                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
+                    record.reserved,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileQpShift,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileQpMask);
+            const uint32_t localRankSize =
+                TileXRMoonEp::MoonEpCombineV2LocalRankSize(
+                    static_cast<uint32_t>(world));
+            const uint32_t expectedRoute =
+                TileXRMoonEp::MoonEpCombineV2PackFullmeshProfileRoute(
+                    sample.fullmeshStep, sample.fullmeshPeer,
+                    sample.fullmeshSuccessor, sample.fullmeshLogicalQp);
+            if (transport != TileXRMoonEp::
+                    MOONEP_COMBINE_V2_PROFILE_TRANSPORT_FULLMESH ||
+                record.reserved != expectedRoute ||
+                sample.fullmeshStep >=
+                    TileXRMoonEp::MoonEpCombineV2StepCount(
+                        static_cast<uint32_t>(world)) ||
+                sample.fullmeshPeer >= static_cast<uint32_t>(world) ||
+                sample.fullmeshSuccessor >= static_cast<uint32_t>(world) ||
+                sample.fullmeshPeer == static_cast<uint32_t>(rank) ||
+                !TileXRMoonEp::MoonEpCombineV2SameServer(
+                    static_cast<uint32_t>(rank), sample.fullmeshPeer,
+                    localRankSize) ||
+                sample.fullmeshLogicalQp !=
+                    TileXRMoonEp::MoonEpCombineV2FullmeshLogicalQp(
+                        sample.fullmeshPeer, localRankSize) ||
+                sample.fullmeshWqeBuildEnd <= 0 ||
+                sample.fullmeshWqeBuildEnd >= sample.fullmeshSubmitEnd ||
+                sample.fullmeshSubmitEnd >= sample.fullmeshCqSuccess) {
+                Abort(rank, "Fullmesh profile validation", 1);
+            }
+        }
         samples->push_back(sample);
     }
+}
+
+float ProfileKernelElapsedMs(int rank,
+    const std::vector<ProfileSample> &samples)
+{
+    if (samples.empty()) {
+        Abort(rank, "final profile sample", 1);
+    }
+    int64_t maxCycles = 0;
+    for (const ProfileSample &sample : samples) {
+        const int64_t cycles = sample.timePoint[
+            TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FINAL_END] -
+            sample.timePoint[
+                TileXRMoonEp::MOONEP_COMBINE_V2_TIME_INIT_BEGIN];
+        maxCycles = std::max(maxCycles, cycles);
+    }
+    if (maxCycles <= 0) {
+        Abort(rank, "final profile duration", 1);
+    }
+    return static_cast<float>(maxCycles) /
+        static_cast<float>(
+            TileXRMoonEp::kMoonEpCombineV2ProfileCyclesPerUs * 1000U);
 }
 
 } // namespace
@@ -658,6 +897,14 @@ int main(int argc, char **argv)
     if (ret != TileXR::TILEXR_SUCCESS) {
         Abort(rank, "TileXRCommInitRankWithSharedQpDomain", ret);
     }
+    TileXRCommPtr weightMemoryComm = nullptr;
+    if (options.fusedWeight) {
+        ret = TileXRCommInitRankMemoryDomain(
+            options.commDomain + 1, world, rank, &weightMemoryComm);
+        if (ret != TileXR::TILEXR_SUCCESS) {
+            Abort(rank, "TileXRCommInitRankMemoryDomain", ret);
+        }
+    }
 
     TileXR::CommArgs *commArgs = nullptr;
     uint32_t qpCount = 0;
@@ -677,7 +924,7 @@ int main(int argc, char **argv)
         uint64_t workspaceBytes = 0;
         uint64_t profileOffset = 0;
         uint64_t outputOffsets[2] = {};
-        ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, kH, kTopK,
+        ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, options.hiddenSize, kTopK,
             bs * kTopK, TILEXR_MOONEP_DTYPE_BFLOAT16, &workspaceBytes,
             &profileOffset, &outputOffsets[0], &outputOffsets[1]);
         if (ret != TILEXR_MOONEP_SUCCESS || workspaceBytes == 0) {
@@ -689,13 +936,25 @@ int main(int argc, char **argv)
 
     void *workspace = nullptr;
     int32_t *dst = nullptr;
+    float *routeWeightsNvs = nullptr;
+    float *routeWeightsSk = nullptr;
     const std::size_t maxDstBytes = static_cast<std::size_t>(maxBs * kTopK) *
         sizeof(int32_t);
+    const std::size_t maxWeightBytes = static_cast<std::size_t>(maxBs * kTopK) *
+        sizeof(float);
     CheckAcl(rank, "aclrtMalloc workspace", aclrtMalloc(&workspace,
         static_cast<std::size_t>(maxWorkspaceBytes), ACL_MEM_MALLOC_HUGE_FIRST));
     CheckAcl(rank, "aclrtMalloc destinations", aclrtMalloc(
         reinterpret_cast<void **>(&dst), maxDstBytes,
         ACL_MEM_MALLOC_HUGE_FIRST));
+    if (options.fusedWeight) {
+        CheckAcl(rank, "aclrtMalloc route weights input", aclrtMalloc(
+            reinterpret_cast<void **>(&routeWeightsNvs), maxWeightBytes,
+            ACL_MEM_MALLOC_HUGE_FIRST));
+        CheckAcl(rank, "aclrtMalloc route weights output", aclrtMalloc(
+            reinterpret_cast<void **>(&routeWeightsSk), maxWeightBytes,
+            ACL_MEM_MALLOC_HUGE_FIRST));
+    }
     CheckAcl(rank, "aclrtMemset workspace", aclrtMemset(workspace,
         static_cast<std::size_t>(maxWorkspaceBytes), 0,
         static_cast<std::size_t>(maxWorkspaceBytes)));
@@ -714,33 +973,45 @@ int main(int argc, char **argv)
                   << " devices_per_host=" << kDeviceCount
                   << " experts=" << options.experts
                   << " k=" << kTopK
-                  << " h=" << kH
+                  << " h=" << options.hiddenSize
                   << " dtype=bf16"
                   << " qp_count=" << qpCount
                   << " max_bs=" << maxBs
                   << " workspace_bytes=" << maxWorkspaceBytes
+                  << " reduce=" << (options.reduceHidden ? "enabled" : "disabled")
+                  << " fused_weight=" << (options.fusedWeight ? "enabled" : "disabled")
                   << std::endl;
     }
 
-    bool allCasesOk = true;
     for (const int64_t bs : options.batchSizes) {
         const int64_t slots = bs * kTopK;
         uint64_t caseWorkspaceBytes = 0;
         uint64_t profileOffset = 0;
         uint64_t outputOffsets[2] = {};
-        ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, kH, kTopK, slots,
-            TILEXR_MOONEP_DTYPE_BFLOAT16, &caseWorkspaceBytes,
+        ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, options.hiddenSize,
+            kTopK, slots, TILEXR_MOONEP_DTYPE_BFLOAT16, &caseWorkspaceBytes,
             &profileOffset, &outputOffsets[0], &outputOffsets[1]);
         if (ret != TILEXR_MOONEP_SUCCESS || caseWorkspaceBytes == 0) {
             Abort(rank, "TileXRMoonEpCombineGetWorkspaceSizeV2 profile", ret);
         }
+        TileXRMoonEp::CombineV2Layout caseLayout {};
+        ret = TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
+            bs, options.hiddenSize, kTopK, slots,
+            TILEXR_MOONEP_DTYPE_BFLOAT16, &caseLayout);
+        if (ret != TILEXR_MOONEP_SUCCESS) {
+            Abort(rank, "TileXRMoonEpBuildCombineV2Layout", ret);
+        }
         const std::size_t sourceElements = static_cast<std::size_t>(slots) *
-            static_cast<std::size_t>(kH);
+            static_cast<std::size_t>(options.hiddenSize);
         const std::size_t sourceBytes = sourceElements * sizeof(uint16_t);
         const std::size_t dstBytes = static_cast<std::size_t>(slots) *
             sizeof(int32_t);
         std::vector<uint16_t> source(sourceElements, SourceValue(rank));
         std::vector<int32_t> destinations(static_cast<std::size_t>(slots));
+        std::vector<float> routeWeights;
+        if (options.fusedWeight) {
+            routeWeights.resize(static_cast<std::size_t>(slots));
+        }
         const int64_t slotsPerRank = slots / world;
         for (int64_t slot = 0; slot < slots; ++slot) {
             const int64_t targetRank = slot % world;
@@ -748,6 +1019,10 @@ int main(int argc, char **argv)
                 slotsPerRank + slot / world;
             destinations[static_cast<std::size_t>(slot)] =
                 static_cast<int32_t>(targetRank * slots + targetSlot);
+            if (options.fusedWeight) {
+                routeWeights[static_cast<std::size_t>(slot)] =
+                    WeightValue(rank, slot, 0U);
+            }
         }
         CheckAcl(rank, "input H2D copy", aclrtMemcpy(workspace,
             static_cast<std::size_t>(maxWorkspaceBytes), source.data(),
@@ -755,83 +1030,122 @@ int main(int argc, char **argv)
         CheckAcl(rank, "destinations H2D copy", aclrtMemcpy(dst,
             maxDstBytes, destinations.data(), dstBytes,
             ACL_MEMCPY_HOST_TO_DEVICE));
+        if (options.fusedWeight) {
+            const std::size_t weightBytes = static_cast<std::size_t>(slots) *
+                sizeof(float);
+            CheckAcl(rank, "route weights H2D copy", aclrtMemcpy(
+                routeWeightsNvs, maxWeightBytes, routeWeights.data(),
+                weightBytes, ACL_MEMCPY_HOST_TO_DEVICE));
+            CheckAcl(rank, "route weights output clear", aclrtMemset(
+                routeWeightsSk, maxWeightBytes, 0, weightBytes));
+        }
         source.clear();
         source.shrink_to_fit();
         destinations.clear();
         destinations.shrink_to_fit();
+        routeWeights.clear();
+        routeWeights.shrink_to_fit();
         if (!BarrierAll(rank, world, "case inputs ready")) {
             Abort(rank, "case input barrier", 1);
         }
 
         uint64_t activeOutputOffset = 0;
-        LaunchCombine(rank, workspace, dst, comm, bs, stream,
-            &activeOutputOffset);
+        LaunchCombine(rank, workspace, dst, comm, weightMemoryComm, bs,
+            options.hiddenSize, stream, options.reduceHidden,
+            options.fusedWeight, routeWeightsNvs, routeWeightsSk,
+            caseLayout.outputOffset, &activeOutputOffset);
         CheckAcl(rank, "correctness stream synchronization",
             aclrtSynchronizeStream(stream));
         const OutputCheckResult outputResult = CheckOutput(
-            rank, world, bs, workspace,
-            activeOutputOffset);
-        const bool validationAccepted =
-            outputResult == OutputCheckResult::Passed ||
-            (options.allowSelfOnlyFailure &&
-                outputResult == OutputCheckResult::SelfOnlyFailed);
+            rank, world, bs, options.hiddenSize, workspace,
+            activeOutputOffset, options.reduceHidden);
+        bool weightResult = !options.fusedWeight ||
+            CheckWeights(rank, world, bs, routeWeightsSk, 0U);
+        if (outputResult != OutputCheckResult::Passed) {
+            ReportFirstKernelFailure(rank, workspace, caseLayout);
+        }
         if (!BarrierAll(rank, world, "correctness validation",
-                validationAccepted)) {
-            allCasesOk = false;
-            std::cout << "COMBINE_V2_RANK_PERF bs=" << bs
-                      << " rank=" << rank
-                      << " correctness=failed" << std::endl;
-            break;
+                outputResult == OutputCheckResult::Passed && weightResult)) {
+            Abort(rank, "correctness validation barrier", 1);
+        }
+
+        if (options.fusedWeight) {
+            const std::size_t weightBytes = static_cast<std::size_t>(slots) *
+                sizeof(float);
+            std::vector<float> continuousWeights(
+                static_cast<std::size_t>(slots));
+            for (int64_t slot = 0; slot < slots; ++slot) {
+                continuousWeights[static_cast<std::size_t>(slot)] =
+                    WeightValue(rank, slot, 1U);
+            }
+            CheckAcl(rank, "continuous route weights H2D copy", aclrtMemcpy(
+                routeWeightsNvs, maxWeightBytes, continuousWeights.data(),
+                weightBytes, ACL_MEMCPY_HOST_TO_DEVICE));
+            CheckAcl(rank, "continuous route weights output clear", aclrtMemset(
+                routeWeightsSk, maxWeightBytes, 0, weightBytes));
+        }
+        if (!BarrierAll(rank, world, "continuous inputs ready")) {
+            Abort(rank, "continuous input barrier", 1);
         }
 
         for (int iteration = 0; iteration < options.warmup; ++iteration) {
-            LaunchCombine(rank, workspace, dst, comm, bs, stream,
-                &activeOutputOffset);
+            LaunchCombine(rank, workspace, dst, comm, weightMemoryComm, bs,
+                options.hiddenSize, stream, options.reduceHidden,
+                options.fusedWeight, routeWeightsNvs, routeWeightsSk,
+                caseLayout.outputOffset, &activeOutputOffset);
+        }
+        if (options.warmup > 0) {
             CheckAcl(rank, "warmup stream synchronization",
                 aclrtSynchronizeStream(stream));
-            if (!options.skipIterationBarriers &&
-                !BarrierAll(rank, world, "warmup iteration")) {
-                Abort(rank, "warmup barrier", 1);
-            }
+        }
+        if (!BarrierAll(rank, world, "timed batch start")) {
+            Abort(rank, "timed batch start barrier", 1);
         }
 
-        std::vector<float> rankSamples;
-        rankSamples.reserve(static_cast<std::size_t>(options.iterations));
         std::vector<ProfileSample> profileSamples;
         if (options.profile) {
-            profileSamples.reserve(static_cast<std::size_t>(options.iterations) *
+            profileSamples.reserve(
                 TileXRMoonEp::MoonEpCombineV2ActiveCoreCount(
                     static_cast<uint32_t>(world)));
         }
+        CheckAcl(rank, "aclrtRecordEvent batch start",
+            aclrtRecordEvent(startEvent, stream));
         for (int iteration = 0; iteration < options.iterations; ++iteration) {
-            CheckAcl(rank, "aclrtRecordEvent start",
-                aclrtRecordEvent(startEvent, stream));
-            LaunchCombine(rank, workspace, dst, comm, bs, stream,
-                &activeOutputOffset);
-            CheckAcl(rank, "aclrtRecordEvent stop",
-                aclrtRecordEvent(stopEvent, stream));
-            CheckAcl(rank, "aclrtSynchronizeEvent stop",
-                aclrtSynchronizeEvent(stopEvent));
-            float elapsedMs = 0.0F;
-            CheckAcl(rank, "aclrtEventElapsedTime",
-                aclrtEventElapsedTime(&elapsedMs, startEvent, stopEvent));
-            rankSamples.push_back(elapsedMs);
-            if (options.profile) {
-                CaptureProfileSamples(rank, world, iteration, workspace,
-                    profileOffset, &profileSamples);
-            }
-            if (!options.skipIterationBarriers &&
-                !BarrierAll(rank, world, "timed iteration")) {
-                Abort(rank, "timed iteration barrier", 1);
-            }
+            LaunchCombine(rank, workspace, dst, comm, weightMemoryComm, bs,
+                options.hiddenSize, stream, options.reduceHidden,
+                options.fusedWeight, routeWeightsNvs, routeWeightsSk,
+                caseLayout.outputOffset, &activeOutputOffset);
+        }
+        CheckAcl(rank, "aclrtRecordEvent batch stop",
+            aclrtRecordEvent(stopEvent, stream));
+        CheckAcl(rank, "aclrtSynchronizeEvent batch stop",
+            aclrtSynchronizeEvent(stopEvent));
+        float batchElapsedMs = 0.0F;
+        CheckAcl(rank, "aclrtEventElapsedTime batch",
+            aclrtEventElapsedTime(&batchElapsedMs, startEvent, stopEvent));
+        const float averageMs = batchElapsedMs /
+            static_cast<float>(options.iterations);
+        if (options.fusedWeight) {
+            weightResult = weightResult &&
+                CheckWeights(rank, world, bs, routeWeightsSk, 1U);
+        }
+        if (!BarrierAll(rank, world, "continuous weight validation",
+                weightResult)) {
+            Abort(rank, "continuous weight validation barrier", 1);
         }
 
-        for (int iteration = 0; iteration < options.iterations; ++iteration) {
+        if (options.profile) {
+            const int finalIteration = options.iterations - 1;
+            CaptureProfileSamples(rank, world, finalIteration, workspace,
+                profileOffset, &profileSamples);
+            const float finalProfileElapsedMs =
+                ProfileKernelElapsedMs(rank, profileSamples);
             std::cout << std::fixed << std::setprecision(6)
                       << "COMBINE_V2_SAMPLE bs=" << bs
-                      << " iteration=" << iteration
+                      << " iteration=" << finalIteration
                       << " rank=" << rank
-                      << " elapsed_ms=" << rankSamples[static_cast<std::size_t>(iteration)]
+                      << " elapsed_ms=" << finalProfileElapsedMs
+                      << " timing_source=kernel_profile"
                       << std::endl;
         }
         for (const ProfileSample &sample : profileSamples) {
@@ -839,8 +1153,23 @@ int main(int argc, char **argv)
                       << " iteration=" << sample.iteration
                       << " rank=" << rank
                       << " core=" << sample.core
+                      << " profile_version="
+                      << TileXRMoonEp::kMoonEpCombineV2ProfileVersion
                       << " cycles_per_us="
-                      << TileXRMoonEp::kMoonEpCombineV2ProfileCyclesPerUs;
+                      << TileXRMoonEp::kMoonEpCombineV2ProfileCyclesPerUs
+                      << " transport="
+                      << (sample.fullmesh ? "fullmesh" : "none")
+                      << " fm_step=" << (sample.fullmesh ?
+                          static_cast<int64_t>(sample.fullmeshStep) : -1)
+                      << " fm_peer=" << (sample.fullmesh ?
+                          static_cast<int64_t>(sample.fullmeshPeer) : -1)
+                      << " fm_successor=" << (sample.fullmesh ?
+                          static_cast<int64_t>(sample.fullmeshSuccessor) : -1)
+                      << " fm_logical_qp=" << (sample.fullmesh ?
+                          static_cast<int64_t>(sample.fullmeshLogicalQp) : -1)
+                      << " fm_wqe_build_end=" << sample.fullmeshWqeBuildEnd
+                      << " fm_submit_end=" << sample.fullmeshSubmitEnd
+                      << " fm_cq_success=" << sample.fullmeshCqSuccess;
             for (uint32_t point = 0U;
                 point < TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount;
                 ++point) {
@@ -856,37 +1185,47 @@ int main(int argc, char **argv)
             }
             std::cout << std::endl;
         }
-        const float total = std::accumulate(rankSamples.begin(),
-            rankSamples.end(), 0.0F);
         std::cout << std::fixed << std::setprecision(6)
                   << "COMBINE_V2_RANK_PERF bs=" << bs
                   << " rank=" << rank
-                  << " avg_ms=" << total / static_cast<float>(rankSamples.size())
+                  << " iterations=" << options.iterations
+                  << " total_ms=" << batchElapsedMs
+                  << " avg_ms=" << averageMs
+                  << " timing_source=batch_acl_event"
+                  << " reduce=" << (options.reduceHidden ? "enabled" : "disabled")
+                  << " fused_weight=" << (options.fusedWeight ? "enabled" : "disabled")
+                  << " weight_correctness=" << (weightResult ? "passed" : "failed")
                   << " correctness=" << OutputCheckName(outputResult)
                   << std::endl;
-        allCasesOk = allCasesOk && validationAccepted;
     }
 
     const bool casesSynchronized = BarrierAll(rank, world,
-        "all benchmark cases", allCasesOk);
+        "all benchmark cases");
     const int unregisterRet = TileXRUDMAUnregister(comm, handle);
     const bool unregisterSynchronized = BarrierAll(rank, world,
         "workspace unregistration",
         unregisterRet == TileXR::TILEXR_SUCCESS);
+    const int destroyWeightRet = weightMemoryComm == nullptr ?
+        TileXR::TILEXR_SUCCESS : TileXRCommDestroy(weightMemoryComm);
     const int destroyRet = TileXRCommDestroy(comm);
     const aclError destroyStartRet = aclrtDestroyEvent(startEvent);
     const aclError destroyStopRet = aclrtDestroyEvent(stopEvent);
     const aclError freeDstRet = aclrtFree(dst);
+    const aclError freeWeightInputRet = routeWeightsNvs == nullptr ?
+        ACL_SUCCESS : aclrtFree(routeWeightsNvs);
+    const aclError freeWeightOutputRet = routeWeightsSk == nullptr ?
+        ACL_SUCCESS : aclrtFree(routeWeightsSk);
     const aclError freeWorkspaceRet = aclrtFree(workspace);
     const aclError destroyStreamRet = aclrtDestroyStream(stream);
     const aclError resetRet = aclrtResetDevice(device);
     const aclError finalizeRet = aclFinalize();
     const bool cleanupOk = unregisterRet == TileXR::TILEXR_SUCCESS &&
+        destroyWeightRet == TileXR::TILEXR_SUCCESS &&
         destroyRet == TileXR::TILEXR_SUCCESS &&
         destroyStartRet == ACL_SUCCESS && destroyStopRet == ACL_SUCCESS &&
-        freeDstRet == ACL_SUCCESS && freeWorkspaceRet == ACL_SUCCESS &&
+        freeDstRet == ACL_SUCCESS && freeWeightInputRet == ACL_SUCCESS &&
+        freeWeightOutputRet == ACL_SUCCESS && freeWorkspaceRet == ACL_SUCCESS &&
         destroyStreamRet == ACL_SUCCESS && resetRet == ACL_SUCCESS &&
         finalizeRet == ACL_SUCCESS;
-    return allCasesOk && casesSynchronized && unregisterSynchronized &&
-        cleanupOk ? 0 : 1;
+    return casesSynchronized && unregisterSynchronized && cleanupOk ? 0 : 1;
 }

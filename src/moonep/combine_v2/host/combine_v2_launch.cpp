@@ -28,9 +28,12 @@ struct CombineV2KernelArgs {
     uint64_t scratchEpoch0Offset;
     uint64_t scratchEpoch1Offset;
     uint64_t doneOffset;
-    uint64_t grantOffset;
+    uint64_t reservedOffset0;
     uint64_t controlSourceOffset;
     uint64_t failureOffset;
+    uint64_t reservedSyncReceiveOffset;
+    uint64_t reservedSyncSourceOffset;
+    uint64_t collectiveStatusOffset;
     uint64_t outputOffset;
     int64_t bs;
     int64_t h;
@@ -39,9 +42,17 @@ struct CombineV2KernelArgs {
     uint64_t rowBytes;
     uint64_t reduceHidden;
     int64_t magic;
+    GM_ADDR weightMemoryCommArgs;
+    GM_ADDR routeWeightsNvs;
+    GM_ADDR routeWeightsSk;
+    uint64_t weightRecordOffset;
+    uint64_t weightDoneOffset;
+    uint64_t weightWindowBytes;
+    uint64_t weightOutputElements;
+    uint64_t hasRouteWeight;
 };
 
-static_assert(sizeof(CombineV2KernelArgs) == 18U * sizeof(uint64_t),
+static_assert(sizeof(CombineV2KernelArgs) == 29U * sizeof(uint64_t),
     "Combine V2 kernel argument ABI changed");
 
 int ConfigureCombineV2SimtMemory(rtTaskCfgInfo_t &cfgInfo)
@@ -78,9 +89,12 @@ int TileXRMoonEpLaunchCombineV2Kernel(
         context.layout.scratchOffset[0],
         context.layout.scratchOffset[1],
         context.layout.doneOffset,
-        context.layout.grantOffset,
+        0U,
         context.layout.controlSourceOffset,
         context.layout.failureOffset,
+        0U,
+        0U,
+        context.layout.collectiveStatusOffset,
         context.layout.outputOffset,
         params.bs,
         params.h,
@@ -88,7 +102,16 @@ int TileXRMoonEpLaunchCombineV2Kernel(
         params.nvS,
         context.layout.rowBytes,
         params.reduceHidden ? 1U : 0U,
-        context.magic
+        context.magic,
+        context.weightMemoryDevArgs,
+        reinterpret_cast<GM_ADDR>(const_cast<float *>(
+            params.routeWeightsNvs)),
+        reinterpret_cast<GM_ADDR>(params.routeWeightsSk),
+        context.weightLayout.recordOffset,
+        context.weightLayout.doneOffset,
+        context.weightLayout.totalBytes,
+        context.weightOutputElements,
+        params.routeWeightsNvs != nullptr ? 1U : 0U
     };
     rtTaskCfgInfo_t cfgInfo {};
     const int memoryRet = ConfigureCombineV2SimtMemory(cfgInfo);
@@ -100,7 +123,7 @@ int TileXRMoonEpLaunchCombineV2Kernel(
         TileXRMoonEpCombineV2KernelBinarySize,
         KernelSignature(kCombineV2KernelSignature),
         kCombineV2KernelName, "combine_v2",
-        params.aivCoreNum, &args, sizeof(args),
+        kMoonEpCombineV2CoreCount, &args, sizeof(args),
         static_cast<rtStream_t>(params.stream), &cfgInfo);
     if (ret == TILEXR_MOONEP_SUCCESS) {
         *params.activeOutputOffset = context.layout.scratchOffset[

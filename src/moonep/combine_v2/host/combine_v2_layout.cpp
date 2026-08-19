@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "combine_v2_profile.h"
+#include "comm_args.h"
 #include "tilexr_moonep.h"
 
 namespace TileXRMoonEp {
@@ -62,12 +63,12 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     uint64_t requiredBytes = 0;
     uint64_t doneOffset = 0;
     uint64_t doneBytes = 0;
-    uint64_t grantOffset = 0;
-    uint64_t grantBytes = 0;
     uint64_t controlSourceOffset = 0;
     uint64_t controlSourceBytes = 0;
     uint64_t failureOffset = 0;
     uint64_t failureBytes = 0;
+    uint64_t collectiveStatusOffset = 0;
+    uint64_t collectiveStatusBytes = 0;
     uint64_t outputOffset = 0;
     uint64_t outputBytes = 0;
     uint64_t totalBytes = 0;
@@ -85,12 +86,7 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
         !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
                 kMoonEpCombineV2RankCount * kMoonEpCombineV2LaneCount,
             kMoonEpCombineV2TokenStrideBytes, &doneBytes) ||
-        !CheckedAdd(doneOffset, doneBytes, &grantOffset) ||
-        !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
-                kMoonEpCombineV2CoreCount * kMoonEpCombineV2LaneCount *
-                kMoonEpCombineV2GrantStepCount,
-            kMoonEpCombineV2GrantSlotBytes, &grantBytes) ||
-        !CheckedAdd(grantOffset, grantBytes, &controlSourceOffset) ||
+        !CheckedAdd(doneOffset, doneBytes, &controlSourceOffset) ||
         !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2CoreCount) *
                 kMoonEpCombineV2LaneCount,
             kMoonEpCombineV2TokenStrideBytes, &controlSourceBytes) ||
@@ -98,7 +94,13 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
         !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
                 kMoonEpCombineV2CoreCount,
             kMoonEpCombineV2TokenStrideBytes, &failureBytes) ||
-        !CheckedAdd(failureOffset, failureBytes, &requiredBytes) ||
+        !CheckedAdd(failureOffset, failureBytes, &collectiveStatusOffset) ||
+        !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
+                kMoonEpCombineV2CollectiveStatusSlotCount,
+            kMoonEpCombineV2CollectiveStatusSlotBytes,
+            &collectiveStatusBytes) ||
+        !CheckedAdd(collectiveStatusOffset, collectiveStatusBytes,
+            &requiredBytes) ||
         !CheckedAlign(requiredBytes, kCombineV2ScratchAlignmentBytes,
             &outputOffset) ||
         !CheckedMultiply(static_cast<uint64_t>(bs), rowBytes, &outputBytes) ||
@@ -120,14 +122,58 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     next.scratchBytes = expertBytes;
     next.doneOffset = doneOffset;
     next.doneBytes = doneBytes;
-    next.grantOffset = grantOffset;
-    next.grantBytes = grantBytes;
     next.controlSourceOffset = controlSourceOffset;
     next.controlSourceBytes = controlSourceBytes;
     next.failureOffset = failureOffset;
     next.failureBytes = failureBytes;
+    next.collectiveStatusOffset = collectiveStatusOffset;
+    next.collectiveStatusBytes = collectiveStatusBytes;
     next.outputOffset = outputOffset;
     next.outputBytes = outputBytes;
+    next.totalBytes = totalBytes;
+    *layout = next;
+    return TILEXR_MOONEP_SUCCESS;
+}
+
+int TileXRMoonEpBuildCombineV2WeightLayout(
+    int64_t nvS, int32_t rankSize, CombineV2WeightLayout *layout)
+{
+    if (layout == nullptr || nvS <= 0 || rankSize <= 0 ||
+        rankSize > TileXR::TILEXR_MAX_RANK_SIZE) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+
+    uint64_t recordPayloadBytes = 0U;
+    uint64_t recordEpochBytes = 0U;
+    uint64_t recordBytes = 0U;
+    uint64_t doneEpochBytes = 0U;
+    uint64_t doneBytes = 0U;
+    uint64_t requiredBytes = 0U;
+    uint64_t totalBytes = 0U;
+    if (!CheckedMultiply(static_cast<uint64_t>(nvS),
+            kMoonEpCombineV2WeightRecordBytes, &recordPayloadBytes) ||
+        !CheckedAlign(recordPayloadBytes, kCombineV2ScratchAlignmentBytes,
+            &recordEpochBytes) ||
+        !CheckedMultiply(recordEpochBytes, kMoonEpCombineV2EpochCount,
+            &recordBytes) ||
+        !CheckedMultiply(static_cast<uint64_t>(rankSize),
+            kMoonEpCombineV2WeightDoneStrideBytes, &doneEpochBytes) ||
+        !CheckedMultiply(doneEpochBytes, kMoonEpCombineV2EpochCount,
+            &doneBytes) ||
+        !CheckedAdd(recordBytes, doneBytes, &requiredBytes) ||
+        !CheckedAlign(requiredBytes, kCombineV2ScratchAlignmentBytes,
+            &totalBytes) ||
+        totalBytes > static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE)) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+
+    CombineV2WeightLayout next {};
+    next.recordOffset = 0U;
+    next.recordEpochBytes = recordEpochBytes;
+    next.recordBytes = recordBytes;
+    next.doneOffset = recordBytes;
+    next.doneEpochBytes = doneEpochBytes;
+    next.doneBytes = doneBytes;
     next.totalBytes = totalBytes;
     *layout = next;
     return TILEXR_MOONEP_SUCCESS;

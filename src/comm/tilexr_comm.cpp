@@ -182,6 +182,9 @@ int TileXRComm::ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state)
     const uint32_t oldExtraFlag = commArgs_.extraFlag;
     const GM_ADDR oldInfoPtr = commArgs_.udmaInfoPtr;
     const GM_ADDR oldRegistryPtr = commArgs_.udmaRegistryPtr;
+    const GM_ADDR oldFullmeshPtr = commArgs_.udmaFullmeshPtr;
+    const uint64_t oldRegistrationGeneration =
+        commArgs_.udmaRegistrationGeneration;
 
     if (state.available && state.infoDev != nullptr) {
         commArgs_.extraFlag |= ExtraFlag::UDMA;
@@ -192,10 +195,22 @@ int TileXRComm::ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state)
         }
         commArgs_.udmaInfoPtr = state.infoDev;
         commArgs_.udmaRegistryPtr = state.registryDev;
+        commArgs_.udmaRegistrationGeneration =
+            state.registrationGeneration;
+        if (state.fullmeshAvailable && state.fullmeshViewDev != nullptr) {
+            commArgs_.extraFlag |= ExtraFlag::UDMA_FULLMESH;
+            commArgs_.udmaFullmeshPtr = state.fullmeshViewDev;
+        } else {
+            commArgs_.extraFlag &= ~ExtraFlag::UDMA_FULLMESH;
+            commArgs_.udmaFullmeshPtr = nullptr;
+        }
     } else {
-        commArgs_.extraFlag &= ~(ExtraFlag::UDMA | ExtraFlag::UDMA_SHARED_QP);
+        commArgs_.extraFlag &= ~(ExtraFlag::UDMA |
+            ExtraFlag::UDMA_SHARED_QP | ExtraFlag::UDMA_FULLMESH);
         commArgs_.udmaInfoPtr = nullptr;
         commArgs_.udmaRegistryPtr = nullptr;
+        commArgs_.udmaFullmeshPtr = nullptr;
+        commArgs_.udmaRegistrationGeneration = 0U;
     }
 
     if (commArgsPtr_ == nullptr) {
@@ -207,6 +222,8 @@ int TileXRComm::ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state)
         commArgs_.extraFlag = oldExtraFlag;
         commArgs_.udmaInfoPtr = oldInfoPtr;
         commArgs_.udmaRegistryPtr = oldRegistryPtr;
+        commArgs_.udmaFullmeshPtr = oldFullmeshPtr;
+        commArgs_.udmaRegistrationGeneration = oldRegistrationGeneration;
         TILEXR_LOG(ERROR) << "TileXR UDMA update comm args failed: " << ret;
         return ret;
     }
@@ -307,6 +324,10 @@ int TileXRComm::SyncCommArgs()
     commArgs_.localRank = localRank_;
     commArgs_.rankSize = rankSize_;
     commArgs_.localRankSize = localRankSize_;
+    commArgs_.commDomain = commDomain_;
+    commArgs_.peerMemBytes =
+        static_cast<uint64_t>(bufferSize_) * 1024U * 1024U +
+        TILEXR_FLAG_BUFF_BYTES;
     for (int i = 0; i < rankSize_; ++i) {
         commArgs_.peerMems[i] = peerMem_[i];    // 这里不会越界，之前有逻辑校验过越界了
     }
@@ -435,6 +456,19 @@ int TileXRComm::GetUDMAQpCount(uint32_t *qpCount) const
     return *qpCount == 0 ? TILEXR_ERROR_NOT_SUPPORT : TILEXR_SUCCESS;
 }
 
+int TileXRComm::QueryUDMAFullmesh(
+    TileXRUDMAFullmeshHostView *view) const
+{
+    if (view == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *view = TileXRUDMAFullmeshHostView {};
+    if (udmaContext_ == nullptr || !udmaContext_->IsAvailable()) {
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+    return udmaContext_->QueryFullmesh(view);
+}
+
 GM_ADDR TileXRComm::GetUDMARegistryPtr() const
 {
     return udmaContext_ == nullptr ? nullptr : udmaContext_->GetRegistryDev();
@@ -548,7 +582,8 @@ int TileXRComm::Init()
         return TILEXR_ERROR_INTERNAL;
     }
 
-    const int32_t localIpcEnabled = IsEnvEnabled("TILEXR_ENABLE_IPC", true) ? 1 : 0;
+    const int32_t localIpcEnabled = memoryOnlyDomain_ ? 1 :
+        (IsEnvEnabled("TILEXR_ENABLE_IPC", true) ? 1 : 0);
     std::vector<int32_t> allIpcEnabled(rankSize_, -1);
     ret = socketExchange_->AllGather(&localIpcEnabled, 1, allIpcEnabled.data());
     if (ret != TILEXR_SUCCESS) {
@@ -574,7 +609,7 @@ int TileXRComm::Init()
         TILEXR_LOG(INFO) << "TileXR IPC memory disabled by TILEXR_ENABLE_IPC";
     }
 
-    const int32_t localCreditIpcEnabled =
+    const int32_t localCreditIpcEnabled = memoryOnlyDomain_ ? 0 :
         IsEnvEnabled("TILEXR_ENABLE_CREDIT_IPC", false) ? 1 : 0;
     std::vector<int32_t> allCreditIpcEnabled(rankSize_, -1);
     ret = socketExchange_->AllGather(
@@ -599,7 +634,8 @@ int TileXRComm::Init()
         TILEXR_LOG(INFO) << "Dedicated credit IPC memory initialized";
     }
 
-    const int32_t localUdmaEnabled = IsEnvEnabled("TILEXR_ENABLE_UDMA", true) ? 1 : 0;
+    const int32_t localUdmaEnabled = memoryOnlyDomain_ ? 0 :
+        (IsEnvEnabled("TILEXR_ENABLE_UDMA", true) ? 1 : 0);
     std::vector<int32_t> allUdmaEnabled(rankSize_, -1);
     ret = socketExchange_->AllGather(&localUdmaEnabled, 1, allUdmaEnabled.data());
     if (ret != TILEXR_SUCCESS) {
@@ -619,9 +655,13 @@ int TileXRComm::Init()
     } else {
         TILEXR_LOG(INFO) << "TileXR UDMA disabled by TILEXR_ENABLE_UDMA";
     }
-    ret = InitSDMA();
-    if (ret != TILEXR_SUCCESS) {
-        return ret;
+    if (!memoryOnlyDomain_) {
+        ret = InitSDMA();
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
+    } else {
+        commArgs_.extraFlag |= ExtraFlag::MEMORY_ONLY;
     }
 
     // set comm args in device.
@@ -1150,9 +1190,10 @@ TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize, int commDomain, int bufferSize,
-    bool sharedQpDomain)
+    bool sharedQpDomain, bool memoryOnlyDomain)
     : rank_(rank), rankSize_(rankSize), commDomain_(commDomain),
-      bufferSize_(bufferSize), sharedQpDomain_(sharedQpDomain)
+      bufferSize_(bufferSize), sharedQpDomain_(sharedQpDomain),
+      memoryOnlyDomain_(memoryOnlyDomain)
 {
 }
 

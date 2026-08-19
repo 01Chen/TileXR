@@ -40,7 +40,21 @@ constexpr int64_t IPC_BUFF_MAX_SIZE = 512LL * 1024 * 1024;
 constexpr int64_t CREDIT_IPC_STRIDE = 512;
 constexpr int64_t CREDIT_IPC_SLOT_BYTES =
     static_cast<int64_t>(TILEXR_MAX_RANK_SIZE) * CREDIT_IPC_STRIDE;
-constexpr int64_t CREDIT_IPC_BYTES = 2 * CREDIT_IPC_SLOT_BYTES;
+constexpr int64_t DISPATCH_CREDIT_IPC_BYTES = 2 * CREDIT_IPC_SLOT_BYTES;
+constexpr int64_t COMBINE_CREDIT_IPC_SIGNAL_BYTES = 64;
+constexpr int64_t COMBINE_CREDIT_IPC_TRANSITION_COUNT = 7;
+constexpr int64_t COMBINE_CREDIT_IPC_CORE_COUNT = 16;
+constexpr int64_t COMBINE_CREDIT_IPC_PLANE_BYTES =
+    COMBINE_CREDIT_IPC_TRANSITION_COUNT *
+    COMBINE_CREDIT_IPC_CORE_COUNT * COMBINE_CREDIT_IPC_SIGNAL_BYTES;
+constexpr int64_t COMBINE_CREDIT_IPC_EPOCH_COUNT = 2;
+constexpr int64_t COMBINE_CREDIT_IPC_BYTES =
+    COMBINE_CREDIT_IPC_EPOCH_COUNT * COMBINE_CREDIT_IPC_PLANE_BYTES;
+constexpr int64_t COMBINE_CREDIT_IPC_BASE = DISPATCH_CREDIT_IPC_BYTES;
+constexpr int64_t CREDIT_IPC_BYTES =
+    COMBINE_CREDIT_IPC_BASE + COMBINE_CREDIT_IPC_BYTES;
+static_assert(COMBINE_CREDIT_IPC_BASE % COMBINE_CREDIT_IPC_SIGNAL_BYTES == 0,
+    "Combine Credit IPC base must be cache-line aligned");
 constexpr int64_t IPC_DATA_OFFSET = 2 * 1024 * 1024; // 每个ping-pong分区前2MB作为flag，之后512MB存储数据
 constexpr int64_t SYNC_FLAG_BIT_NUM = 10;  // cce 算子在用
 constexpr int64_t MEM_DMA_UNIT_INT_NUM = 4;
@@ -98,9 +112,11 @@ struct ExtraFlag {
     static constexpr uint32_t UDMA = 1 << 10;
     static constexpr uint32_t SDMA = 1 << 11;
     static constexpr uint32_t UDMA_SHARED_QP = 1 << 12;
+    static constexpr uint32_t UDMA_FULLMESH = 1 << 13;
     static constexpr uint32_t ATOMIC_ENABLE = 1 << 15;  // 表示在910A5算子中启用atomic实现
     static constexpr uint32_t IS_GREATER_THAN_40_AIV = 1 << 16;
     static constexpr uint32_t PERF_CYCLE_A5 = 1 << 17;
+    static constexpr uint32_t MEMORY_ONLY = 1 << 18;
 };
 
 struct CommArgs {
@@ -123,6 +139,11 @@ struct CommArgs {
     GM_ADDR udmaInfoPtr = nullptr;  // device-side TileXR::UDMAInfo*; nullptr 表示 UDMA 不可用
     GM_ADDR udmaRegistryPtr = nullptr;  // device-side TileXRUDMARegistry* for user-registered UDMA memory
     GM_ADDR sdmaWorkspacePtr = nullptr;  // device-side SDMA workspace; nullptr 表示 SDMA 不可用
+    GM_ADDR udmaFullmeshPtr = nullptr;  // device-side TileXRUDMAFullmeshDeviceView*
+    uint64_t udmaRegistrationGeneration = 0U;
+    uint64_t peerMemBytes = 0U;
+    int32_t commDomain = 0;
+    uint32_t reserved0 = 0U;
 };
 
 struct LcclDumpBlockInfo {

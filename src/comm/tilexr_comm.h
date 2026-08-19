@@ -16,6 +16,7 @@
 #include <string>
 #include "../include/tilexr_sdma_types.h"
 #include "../include/tilexr_udma_reg.h"
+#include "../include/tilexr_udma_fullmesh.h"
 #include "../include/tilexr_types.h"
 #include "../include/tilexr_api.h"
 #include "../include/comm_args.h"
@@ -31,7 +32,7 @@ class TileXRComm {
 public:
     TileXRComm(int rank, int rankSize);
     TileXRComm(int rank, int rankSize, int commDomain, int bufferSize,
-        bool sharedQpDomain = false);
+        bool sharedQpDomain = false, bool memoryOnlyDomain = false);
     TileXRComm(int rank, int rankSize, TileXRUniqueId commId);
     ~TileXRComm();
     TileXRComm(const TileXRComm &) = delete;
@@ -51,6 +52,7 @@ public:
     int UnregisterUDMAProfile(TileXRUDMAProfileHandle handle);
     int QueryUDMAProfile(TileXRUDMAProfileHandle handle, TileXRUDMAProfileView *view) const;
     int GetUDMAQpCount(uint32_t *qpCount) const;
+    int QueryUDMAFullmesh(TileXRUDMAFullmeshHostView *view) const;
     GM_ADDR GetUDMARegistryPtr() const;
     const TileXRUDMARegistry* GetUDMARegistryHost() const;
     bool IsSDMAAvailable() const;
@@ -105,6 +107,7 @@ private:
     int commDomain_ = {};
     int bufferSize_ = TILEXR_COMM_BUFFER_SIZE;
     bool sharedQpDomain_ = false;
+    bool memoryOnlyDomain_ = false;
 
     // shared ping pong buff，这个地址就是一开始申请在HBM上的，所以host上可以取到，但不能直接修改。
     GM_ADDR peerMem_[TILEXR_MAX_RANK_SIZE] = {};
