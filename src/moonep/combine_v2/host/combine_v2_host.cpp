@@ -415,7 +415,7 @@ int TileXRMoonEpPrepareCombineV2Launch(
     uint32_t qpCount = 0;
     ret = TileXRUDMAGetQpCount(params.comm, &qpCount);
     if (ret != TileXR::TILEXR_SUCCESS ||
-        qpCount != kMoonEpCombineV2QpCount) {
+        qpCount < kMoonEpCombineV2QpCount) {
         *context = CombineV2LaunchContext {};
         std::ostringstream detail;
         detail << "rank=" << commArgs.rank
