@@ -141,3 +141,25 @@ def test_stage_summary_can_color_latency_delta() -> None:
     assert "\x1b[32m" in output
     assert "\x1b[31m" in output
     assert "-1.2%" in output
+
+
+def test_comparison_labels_cross_peer_mode_reference() -> None:
+    model = _model_performance()
+    model["comparison"] = {
+        "compatible": False,
+        "classification": "checked-in reference",
+        "captured_environment_sha256": "a" * 64,
+        "current_environment_sha256": "b" * 64,
+        "dispatch_peer_mode": {
+            "compatible": False,
+            "model": "legacy",
+            "replay": "group_credit",
+        },
+    }
+
+    output = format_model_replay_comparison(
+        model, _replay_summary(), stage_summary_only=True
+    )
+
+    assert "Performance reference: checked-in reference" in output
+    assert "Dispatch peer mode: model=legacy  replay=group_credit" in output

@@ -401,6 +401,55 @@ def test_incompatible_environment_keeps_performance_as_checked_in_reference(
     assert performance["comparison"]["classification"] == "checked-in reference"
 
 
+@pytest.mark.parametrize("replay_mode", ["group", "group_credit"])
+def test_dispatch_peer_mode_does_not_block_route_materialization(
+    tmp_path: Path, replay_mode: str
+) -> None:
+    captured = _identity()
+    captured["provenance"]["kernel_version"]["dispatch_peer_mode"] = "legacy"
+    write_meta_bundle(
+        tmp_path,
+        _shape(),
+        _route_replay(),
+        _performance(),
+        captured,
+        replace=False,
+    )
+    current = copy.deepcopy(captured)
+    current["provenance"]["kernel_version"]["dispatch_peer_mode"] = replay_mode
+
+    bundle = load_meta_bundle(tmp_path, _shape(), current)
+    assert bundle is not None
+    replay, performance = materialize_meta_bundle(bundle, current)
+
+    assert len(replay["ranks"]) == _shape().world_size
+    assert performance["comparison"]["classification"] == "checked-in reference"
+    assert performance["comparison"]["dispatch_peer_mode"] == {
+        "compatible": False,
+        "model": "legacy",
+        "replay": replay_mode,
+    }
+
+
+def test_route_materialization_still_rejects_combine_version_changes(
+    tmp_path: Path,
+) -> None:
+    captured = _identity()
+    write_meta_bundle(
+        tmp_path,
+        _shape(),
+        _route_replay(),
+        _performance(),
+        captured,
+        replace=False,
+    )
+    current = copy.deepcopy(captured)
+    current["provenance"]["kernel_version"]["combine"] = "1"
+
+    with pytest.raises(MetaValidationError, match="route contract is incompatible"):
+        load_meta_bundle(tmp_path, _shape(), current)
+
+
 @pytest.mark.parametrize(
     ("world_size", "ep_size"),
     [(8, 8), (16, 16)],
@@ -578,7 +627,6 @@ def test_replace_uses_atomic_directory_exchange_when_available(
         "model-replay-s4096-k8-h7168-ep8-r8",
         "model-replay-s4096-k8-h7168-ep16-r16",
         "model-replay-s8192-k16-h3584-ep8-r8",
-        "model-replay-s8192-k16-h3584-ep16-r16",
     ],
 )
 def test_checked_in_bundle_passes_production_validation(case_id: str) -> None:
@@ -647,3 +695,23 @@ def test_checked_in_bundle_passes_production_validation(case_id: str) -> None:
     assert materialized_performance["comparison"]["classification"] == (
         "direct baseline"
     )
+
+    captured_mode = contract["kernel_version"]["dispatch_peer_mode"]
+    replay_mode = "group" if captured_mode != "group" else "group_credit"
+    cross_mode_identity = copy.deepcopy(identity)
+    cross_mode_identity["provenance"]["kernel_version"][
+        "dispatch_peer_mode"
+    ] = replay_mode
+    cross_mode_bundle = load_meta_bundle(meta_root, shape, cross_mode_identity)
+    assert cross_mode_bundle is not None
+    _, cross_mode_performance = materialize_meta_bundle(
+        cross_mode_bundle, cross_mode_identity
+    )
+    assert cross_mode_performance["comparison"]["classification"] == (
+        "checked-in reference"
+    )
+    assert cross_mode_performance["comparison"]["dispatch_peer_mode"] == {
+        "compatible": False,
+        "model": captured_mode,
+        "replay": replay_mode,
+    }

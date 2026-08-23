@@ -468,6 +468,15 @@ Linux 间使用 `rsync -a` 保留链接语义，但不能把“链接存在”�
 `checked-in reference`。不要为了复用路由而放宽性能标签，也不要为了性能 provenance 的
 主机差异而阻止路由 replay。
 
+Dispatch 的 `legacy`、`group` 和 `group_credit` 是数据面 peer/WQE 调度策略，不是模型
+TopK、expert histogram 或 Planning metadata 的输入契约。同一 shape 和其余 route contract
+一致时，meta 路由应允许跨 peer mode 重建；完整的 meta checksum 和 mode provenance 仍须
+保留，runtime cache identity 也继续按实际 mode 隔离。性能兼容性必须比较包含 peer mode 的
+完整 provenance：mode 不同时标为 `checked-in reference`，并在比较输出中同时显示模型采集
+mode 和当前 replay mode，不能把 legacy 性能冒充 grouped 实测。本规则的自动化边界覆盖
+合成 meta、上库 bundle 和禁止模型 callback 的 meta-hit 路径；它不替代对应 mode 的实机
+数据面验证。
+
 隐私扫描 IP 时必须要求完整点分数字 token 边界。固件版本 `9.0.0.200.200` 包含四段数字
 子串，但不是 IP；把它误拒绝会发生在模型和 profiler 均已完成后的 meta 发布边界。扫描器应
 继续拒绝嵌入文本的真实 IPv4，同时用回归测试覆盖五段固件版本。

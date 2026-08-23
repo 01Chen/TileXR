@@ -211,9 +211,15 @@ def test_meta_hit_materializes_cross_host_cache_without_model_callbacks(
     source_cache = tmp_path / "source-cache"
     destination_cache = tmp_path / "destination-cache"
     meta_root = tmp_path / "meta"
+    source_identity = _identity()
+    source_identity["provenance"]["kernel_version"] = {
+        "combine": "2",
+        "dispatch_peer_mode": "legacy",
+        "performance_mode": "framework_profiler",
+    }
     first = prepare_replay_cache(
         source_cache,
-        _identity(),
+        source_identity,
         _shape(),
         capture_id="capture-1",
         source="cache",
@@ -225,7 +231,7 @@ def test_meta_hit_materializes_cross_host_cache_without_model_callbacks(
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in first.meta_path.iterdir()
     }
-    cross_host_identity = copy.deepcopy(_identity())
+    cross_host_identity = copy.deepcopy(source_identity)
     cross_host_identity["provenance"].update(
         {
             "driver": "other-host-driver",
@@ -238,6 +244,9 @@ def test_meta_hit_materializes_cross_host_cache_without_model_callbacks(
             },
         }
     )
+    cross_host_identity["provenance"]["kernel_version"][
+        "dispatch_peer_mode"
+    ] = "group"
 
     def must_not_capture(*_args, **_kwargs):
         raise AssertionError("model capture must not run on a meta hit")
@@ -267,6 +276,11 @@ def test_meta_hit_materializes_cross_host_cache_without_model_callbacks(
         "captured_environment_sha256": performance["comparison"][
             "captured_environment_sha256"
         ],
+        "dispatch_peer_mode": {
+            "compatible": False,
+            "model": "legacy",
+            "replay": "group",
+        },
     }
     assert meta_files == {
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()

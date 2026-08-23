@@ -309,6 +309,24 @@ def _format_comparison_inputs(replay_summary: Mapping[str, object]) -> str:
     )
 
 
+def _format_performance_reference(model_performance: Mapping[str, object]) -> str:
+    comparison = model_performance.get("comparison")
+    if not isinstance(comparison, Mapping):
+        return ""
+    classification = comparison.get("classification")
+    if not isinstance(classification, str) or not classification:
+        return ""
+    lines = [f"Performance reference: {classification}"]
+    peer_mode = comparison.get("dispatch_peer_mode")
+    if isinstance(peer_mode, Mapping):
+        model_mode = peer_mode.get("model", "unknown")
+        replay_mode = peer_mode.get("replay", "unknown")
+        lines.append(
+            f"Dispatch peer mode: model={model_mode}  replay={replay_mode}"
+        )
+    return "\n".join(lines)
+
+
 def _format_table(headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
     widths = [
         max(_visible_len(headers[index]), *(_visible_len(row[index]) for row in rows))
@@ -356,6 +374,10 @@ def format_model_replay_stage_comparison(
 ) -> str:
     if replay_summary.get("benchmark_kind") != "model_flow":
         raise ValueError("replay summary is not a model-flow report")
+    comparison_inputs = _format_comparison_inputs(replay_summary)
+    performance_reference = _format_performance_reference(model_performance)
+    if performance_reference:
+        comparison_inputs = f"{comparison_inputs}\n{performance_reference}"
     model = _model_stage_performance(model_performance)
     replay = _replay_stage_performance(replay_summary)
     execution = replay_summary.get("stage_execution")
@@ -431,7 +453,7 @@ def format_model_replay_stage_comparison(
     )
     return "\n".join(
         (
-            _format_comparison_inputs(replay_summary),
+            comparison_inputs,
             "",
             "MoonEP model vs cascade replay stage summary",
             "Statistics: rank means aggregated as median / min / max; replay delta uses medians",

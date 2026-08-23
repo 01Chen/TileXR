@@ -653,7 +653,7 @@ __aicore__ inline bool InitDispatchWqeBatchState(
     state.physicalQpIdx = physicalQpIdx;
     state.head = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
         qpCtxEntry->headAddr), 0);
-    state.wqeCount = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+    state.completionCount = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
         qpCtxEntry->wqeCntAddr), 0);
     state.tail = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
         qpCtxEntry->tailAddr), 0);
@@ -671,7 +671,7 @@ __aicore__ inline bool InitDispatchWqeBatchState(
     state.rmtTokenValue = remoteMemInfo->rmtTokenValue;
     state.stagedDoorbellHead = state.head;
     state.stagedWqeCount = 0U;
-    state.finalWqeCount = state.wqeCount;
+    state.finalHead = state.head;
     state.doorbellPending = 0U;
     state.finalStaged = 0U;
     state.doorbellRung = 0U;

@@ -331,6 +331,30 @@ def _route_contract(identity: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def _route_compatibility_view(
+    contract: Mapping[str, object],
+) -> dict[str, object]:
+    compatible = copy.deepcopy(dict(contract))
+    kernel_version = compatible.get("kernel_version")
+    if isinstance(kernel_version, Mapping):
+        compatible["kernel_version"] = {
+            name: copy.deepcopy(value)
+            for name, value in kernel_version.items()
+            if name != "dispatch_peer_mode"
+        }
+    return compatible
+
+
+def _dispatch_peer_mode(provenance: object) -> str:
+    if isinstance(provenance, Mapping):
+        kernel_version = provenance.get("kernel_version")
+        if isinstance(kernel_version, Mapping):
+            mode = kernel_version.get("dispatch_peer_mode")
+            if isinstance(mode, str) and mode:
+                return mode
+    return "unknown"
+
+
 def _checked_in_provenance(
     shape: ReplayShape,
     route_replay: Mapping[str, object],
@@ -599,7 +623,9 @@ def _validate_route_contract(
     recorded_sha = compatibility.get("route_contract_sha256")
     if recorded_sha != _sha256_bytes(_canonical_bytes(dict(contract))):
         raise MetaValidationError("meta route contract checksum mismatch")
-    if _canonical_bytes(dict(contract)) != _canonical_bytes(expected):
+    if _canonical_bytes(_route_compatibility_view(contract)) != _canonical_bytes(
+        _route_compatibility_view(expected)
+    ):
         raise MetaValidationError("meta route contract is incompatible")
 
 
@@ -937,6 +963,8 @@ def materialize_meta_bundle(
     captured = performance.get("provenance")
     current = _sanitize_environment_provenance(identity)
     compatible = _canonical_bytes(captured) == _canonical_bytes(current)
+    captured_peer_mode = _dispatch_peer_mode(captured)
+    current_peer_mode = _dispatch_peer_mode(current)
     performance["comparison"] = {
         "compatible": compatible,
         "classification": (
@@ -944,6 +972,11 @@ def materialize_meta_bundle(
         ),
         "current_environment_sha256": _sha256_bytes(_canonical_bytes(current)),
         "captured_environment_sha256": _sha256_bytes(_canonical_bytes(captured)),
+        "dispatch_peer_mode": {
+            "compatible": captured_peer_mode == current_peer_mode,
+            "model": captured_peer_mode,
+            "replay": current_peer_mode,
+        },
     }
     validate_model_performance(performance, identity)
     return replay, performance
