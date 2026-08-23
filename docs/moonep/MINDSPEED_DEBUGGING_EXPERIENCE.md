@@ -488,6 +488,70 @@ Linux 间使用 `rsync -a` 保留链接语义，但不能把“链接存在”�
 除 capture/source provenance 外与模型生成的 runtime route 语义字段完全一致；比较完整 JSON
 时应分别校验两类 provenance，不能要求新 generation 伪装成原 capture。
 
+模型、8/8 profiler 和 post-idle 全部成功后仍可能在 meta 发布边界失败；2026-08-23 的
+`S=8192,K=16,H=3584,EP=8,R=8` grouped capture 首次暴露
+`model performance provenance firmware is unavailable`。根因是 runtime provenance 只接受
+手工 `TILEXR_MODEL_REPLAY_FIRMWARE_ID`，没有使用目标机已有的只读 board 信息。缺少显式
+覆盖时，应有界调用 `npu-smi info -t board -i 0`，只提取 Firmware Version、Chip Name 和
+Chip Version；显式环境覆盖仍优先，命令失败或字段缺失仍保留 `unavailable` 并拒绝发布，
+不能猜测版本。单元测试覆盖解析和组合规则，B131 Ascend950PR 实机探针得到
+`9.0.0.200.200` 与 `Ascend950PR-V100`；该证据只验证 provenance 探针，不替代模型/replay
+数据面验证。
+
+## managed follower 的源码身份与偶发算子状态
+
+2026-08-22 的 B131 双机 16 rank、`S=8192,K=16,H=3584,EP=16,R=16`
+model replay 中，leader 已发布完整 generation，但 follower 在启动级联前报告
+`follower cache identity mismatch`。首个失败边界不是路由或通信：Mutagen 部署按规则
+排除了 `.git`，leader 通过 `TILEXR_MODEL_REPLAY_TILEXR_GIT_SHA` 提供显式源码版本，
+managed follower 却没有转发该变量，因而把同一源码识别为 `unavailable`。修复应在 follower
+环境白名单中转发已经校验的 Git SHA；不能放宽 shape、runner、adapter、Kernel 或安装产物
+身份校验。脚本回归测试应固定覆盖该变量。
+
+同一轮诊断中，一次长轮次 replay 在 ReduceGrad 返回 rank-local `3` 后由跨 rank barrier
+传播为 `1`，但保持输入、缓存和二进制不变的后续 16-rank 完整运行通过，无法稳定复现。
+因此临时 phase/status 编码只用于证伪，不应作为产品行为提交，也不能据单次状态修改
+ReduceGrad 协议。验证边界至少要保存失败 epoch、owner rank、前序 stage DFX、运行身份，
+并用相同 generation 重跑；只有 rich status 稳定指向同一 post/flush/quiet 边界时才进入
+对应 SQ/CQ 修复。安装产物身份必须包含独立的
+`libtilexr-moonep-reduce-grad.so`，否则 Kernel 变更后旧 cache key 仍可能命中，破坏该 A/B。
+
+在变基到当时最新 `main` 后，正式非诊断构建进一步完成了同一 8K/K16/H3584 路径的
+验证闭环：单机 EP8/R8 和双机 EP16/R16 均以 5 轮 warmup、20 轮统计，通过全部 rank 和
+55 stage。两个规模都分别强制执行 `model`、`meta`、`cache`；`meta` 从空 runtime root
+重建 generation，`meta` 和 `cache` 都把模型启动器设为 `/bin/false`，证明 compatible meta
+不依赖当前机器已有 runtime cache，且两条命中路径都没有隐藏的模型 fallback。三条路径都
+记录 framework profiler 和 stage barrier 为启用，Kernel 编译期 Dispatch DFX/profiling 和
+Combine V2 profiling 为关闭。
+该结果只覆盖 B131、Ascend950PR、legacy Dispatch peer mode 和已记录的两节点拓扑；一次
+不可复现的 ReduceGrad 状态不足以支持修改 Kernel 协议。
+
+## grouped replay 的 completion counter 与控制 token 发布顺序
+
+2026-08-22 在 B131、Ascend950PR、`S=8192,K=16,H=3584` 的 grouped replay 中，
+`group` 和 `group_credit` 的首个失败边界分成两层。首先，Dispatch 把
+`wqeCntAddr` 当成 SQ head frontier：一个 batch 只生成一个 ordered-completion CQE，旧代码
+却按 batch 内 WQE 数增加该字段，并用它作为 terminal drain 目标。这里应把
+`wqeCntAddr` 作为 completion counter，每个 completion batch 只加一；SQ drain 则等待
+真实的最终 `head`。修复后短轮次通过，但双机 16 rank 的 `group` 长轮次仍稳定在
+replay epoch 50 的 Combine Done wait 失败。
+
+第二层证据更具辨识度：失败接收端期望 token `1792`，实际为 `1776`，差值恰好是一次
+launch 的 token 步长；另一轮也观察到期望 `2872`、实际 `2856`。发送端 ordered CQ 已完成，
+但稀疏 lane 1 的接收端仍收到上一轮 token。根因是 Combine V2 先用 scalar GM store 更新
+UDMA 本地 source，再 clean cache 并立即发布 WQE/doorbell；这个序列没有建立目标 CANN
+数据面可依赖的 MTE3 完成顺序。修复方式是复用现有 256B WQE context UB，在 UB 中构造
+完整 64B token cache line，通过 `DataCopyPad` 写入注册 GM，并在组装引用该 source 的 WQE
+前等待 `MTE3_S`。复用的 fullmesh WQE 还必须显式清零 `flag`，避免上一个 completion batch
+遗留 ordered-completion 位。
+
+最小 A/B 只改变 token 发布路径后，原稳定失败的双机 16 rank `group`、warmup 5 +
+iterations 20 连续两次通过；相同规模 `group_credit` 5+20 和 `legacy` 5+1 通过，单机
+8 rank 的 `group`、`group_credit` 5+20 也通过。所有运行都完成全 rank、55-stage 汇总，
+保留 framework profiler 和 stage barrier；输入由 compatible meta 重建，并把模型启动器
+设为 `/bin/false`，因此这些结果证明 replay 数据面和 meta-only 路径，不代表 grouped
+模型采集本身已完成验证。该结论不能外推到 64/128 rank 或其他 CANN、SoC 和拓扑。
+
 ## 当前实现状态说明
 
 本文记录的是已验证经验，不代表所有修复都已经进入 `main`。截至 2026-08-12：

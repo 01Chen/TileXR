@@ -577,6 +577,8 @@ def test_replace_uses_atomic_directory_exchange_when_available(
     [
         "model-replay-s4096-k8-h7168-ep8-r8",
         "model-replay-s4096-k8-h7168-ep16-r16",
+        "model-replay-s8192-k16-h3584-ep8-r8",
+        "model-replay-s8192-k16-h3584-ep16-r16",
     ],
 )
 def test_checked_in_bundle_passes_production_validation(case_id: str) -> None:

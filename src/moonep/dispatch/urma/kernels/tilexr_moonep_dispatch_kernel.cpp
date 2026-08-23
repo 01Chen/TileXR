@@ -488,7 +488,7 @@ struct DispatchWqeBatchState {
     uint32_t qpIdx;
     uint32_t physicalQpIdx;
     uint32_t head;
-    uint32_t wqeCount;
+    uint32_t completionCount;
     uint32_t tail;
     uint32_t cqTail;
     uint32_t outstanding;
@@ -502,7 +502,7 @@ struct DispatchWqeBatchState {
     uint32_t rmtTokenValue;
     uint32_t stagedDoorbellHead;
     uint32_t stagedWqeCount;
-    uint32_t finalWqeCount;
+    uint32_t finalHead;
     uint32_t doorbellPending;
     uint32_t finalStaged;
     uint32_t doorbellRung;
@@ -727,7 +727,7 @@ __aicore__ inline bool InitDispatchFullmeshWqeBatchState(
     state.physicalQpIdx = slot;
     state.head = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
         qpCtxEntry->headAddr), 0);
-    state.wqeCount = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+    state.completionCount = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
         qpCtxEntry->wqeCntAddr), 0);
     state.tail = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
         qpCtxEntry->tailAddr), 0);
@@ -745,7 +745,7 @@ __aicore__ inline bool InitDispatchFullmeshWqeBatchState(
     state.rmtTokenValue = remoteMemInfo->rmtTokenValue;
     state.stagedDoorbellHead = state.head;
     state.stagedWqeCount = 0U;
-    state.finalWqeCount = state.wqeCount;
+    state.finalHead = state.head;
     state.doorbellPending = 0U;
     state.finalStaged = 0U;
     state.doorbellRung = 0U;
@@ -1307,16 +1307,16 @@ __aicore__ inline bool SubmitDispatchWqeBatch(DispatchWqeBatchState &state,
     SyncFunc<AscendC::HardEvent::MTE3_S>();
 
     const uint32_t batchEndHead = state.head + batchCount;
-    const uint32_t batchEndWqeCount = state.wqeCount + batchCount;
+    const uint32_t batchEndCompletionCount = state.completionCount + 1U;
     st_dev(batchEndHead, reinterpret_cast<__gm__ uint32_t *>(
         state.qpCtxEntry->headAddr), 0);
-    st_dev(batchEndWqeCount, reinterpret_cast<__gm__ uint32_t *>(
+    st_dev(batchEndCompletionCount, reinterpret_cast<__gm__ uint32_t *>(
         state.qpCtxEntry->wqeCntAddr), 0);
     RecordDispatchTraceEvent(trace, TileXRMoonEp::kDispatchTraceSqPublish,
         state.targetRank, state.qpIdx, group, chunk, batchCount, batchBytes,
         0U, sqPublishBegin, DispatchTraceCycle(trace));
     state.head = batchEndHead;
-    state.wqeCount = batchEndWqeCount;
+    state.completionCount = batchEndCompletionCount;
     state.outstanding += batchCount;
     state.stagedDoorbellHead = batchEndHead;
     state.stagedWqeCount += batchCount;
@@ -1586,18 +1586,18 @@ __aicore__ inline bool StageDispatchQpBatch(
     SyncFunc<AscendC::HardEvent::MTE3_S>();
 
     state.head += batchCount;
-    state.wqeCount += batchCount;
+    state.completionCount += 1U;
     state.outstanding += batchCount;
     state.stagedDoorbellHead = state.head;
     state.stagedWqeCount += batchCount;
     state.doorbellPending = 1U;
     if (finalBatch) {
-        state.finalWqeCount = state.wqeCount;
+        state.finalHead = state.head;
         state.finalStaged = 1U;
     }
     st_dev(state.head, reinterpret_cast<__gm__ uint32_t *>(
         state.qpCtxEntry->headAddr), 0);
-    st_dev(state.wqeCount, reinterpret_cast<__gm__ uint32_t *>(
+    st_dev(state.completionCount, reinterpret_cast<__gm__ uint32_t *>(
         state.qpCtxEntry->wqeCntAddr), 0);
     RecordDispatchTraceEvent(trace, TileXRMoonEp::kDispatchTraceSqPublish,
         state.targetRank, state.qpIdx, group, chunk, batchCount, batchBytes,
@@ -1648,7 +1648,7 @@ __aicore__ inline bool DispatchDrainPeerFinalCq(
     for (uint32_t qpIdx = 0U; qpIdx < peer.qpCount; ++qpIdx) {
         DispatchWqeBatchState &state = peer.qpState[qpIdx];
         if (state.finalStaged == 0U || state.doorbellRung == 0U ||
-            !DispatchDrainSqToExpected(state, state.finalWqeCount, cqeLocal,
+            !DispatchDrainSqToExpected(state, state.finalHead, cqeLocal,
                 timeoutTicks, peer.issuePhase, dfxFlags, firstQuietStatus,
                 firstQuietPhase, timeoutPeer, timeoutPhase, timeoutObserved)) {
             return false;

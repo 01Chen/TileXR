@@ -473,12 +473,45 @@ def _file_identity(path: Path) -> str:
     return f"sha256:{_sha256_file(path)}" if path.is_file() else "unavailable"
 
 
+def _npu_smi_board_identity() -> dict[str, str]:
+    try:
+        completed = subprocess.run(
+            ["npu-smi", "info", "-t", "board", "-i", "0"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if completed.returncode != 0:
+        return {}
+
+    fields: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        match = re.fullmatch(r"\s*([^:]+?)\s*:\s*(.*?)\s*", line)
+        if match is not None and match.group(1) in {
+            "Chip Name",
+            "Chip Version",
+            "Firmware Version",
+        }:
+            fields[match.group(1)] = match.group(2)
+    chip_name = fields.get("Chip Name", "")
+    chip_version = fields.get("Chip Version", "")
+    soc = "-".join(value for value in (chip_name, chip_version) if value)
+    return {
+        "firmware": fields.get("Firmware Version", ""),
+        "soc": soc,
+    }
+
+
 def _install_artifacts_identity(install_prefix: Path) -> dict[str, str]:
     lib_dir_candidates = (install_prefix / "lib64", install_prefix / "lib")
     names = (
         "libtile-comm.so",
         "libtilexr-moonep.so",
         "libtilexr-moonep-combine-v2.so",
+        "libtilexr-moonep-reduce-grad.so",
     )
     result: dict[str, str] = {}
     for name in names:
@@ -533,6 +566,14 @@ def build_runtime_provenance(
     cann_env = Path(config.get("MODEL_RUNNER_CANN_ENV", ""))
     install_prefix = Path(config.get("MODEL_RUNNER_INSTALL_PREFIX", ""))
     driver_version = Path("/usr/local/Ascend/driver/version.info")
+    firmware = env.get("TILEXR_MODEL_REPLAY_FIRMWARE_ID", "").strip()
+    soc = (
+        env.get("TILEXR_MODEL_REPLAY_SOC_ID", "").strip()
+        or env.get("ASCEND_SOC_VERSION", "").strip()
+    )
+    board_identity = _npu_smi_board_identity() if not firmware or not soc else {}
+    firmware = firmware or board_identity.get("firmware", "") or "unavailable"
+    soc = soc or board_identity.get("soc", "") or "unavailable"
     return {
         "tilexr_git_sha": _tilexr_revision(source, env),
         "adapter_sha256": _sha256_file(adapter),
@@ -567,11 +608,8 @@ def build_runtime_provenance(
         "driver": env.get(
             "TILEXR_MODEL_REPLAY_DRIVER_ID", _file_identity(driver_version)
         ),
-        "firmware": env.get("TILEXR_MODEL_REPLAY_FIRMWARE_ID", "unavailable"),
-        "soc": env.get(
-            "TILEXR_MODEL_REPLAY_SOC_ID",
-            env.get("ASCEND_SOC_VERSION", "unavailable"),
-        ),
+        "firmware": firmware,
+        "soc": soc,
         "topology": {
             "nodes": hosts,
             "node_count": settings.node_count,

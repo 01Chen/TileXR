@@ -790,6 +790,16 @@ elif [[ "${case_id}" == "${plan_reuse_repro_case_id}" ]]; then
 elif [[ "${is_model_flow}" == "true" ]]; then
     benchmark_kind="model_flow"
     export TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES="${TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES:-$((768 * 1024 * 1024))}"
+    case "${TILEXR_MOONEP_DISPATCH_PEER_MODE:-legacy}" in
+        group|group_credit)
+            export TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS="${TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS:-100000000}"
+            ;;
+    esac
+fi
+planner_wait_iterations="${TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS:-1000000}"
+if [[ ! "${planner_wait_iterations}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS must be a positive integer: ${planner_wait_iterations}" >&2
+    exit 2
 fi
 if [[ "${TILEXR_MOONEP_DIAGNOSTIC_FLOW:-0}" == "1" &&
       "${is_model_flow}" == "true" ]]; then
@@ -1037,6 +1047,7 @@ model_replay_launch_followers() {
         TILEXR_ENABLE_CREDIT_IPC
         TILEXR_INSTALL_PREFIX
         TILEXR_LOG_LEVEL
+        TILEXR_MODEL_REPLAY_TILEXR_GIT_SHA
         TILEXR_MODEL_RUNNER_CONFIG
         TILEXR_MOONEP_AUTO_BUILD_INSTALL
         TILEXR_MOONEP_BARRIER_ADDR
@@ -1148,6 +1159,7 @@ if (( node_count > 1 )); then
         --install-prefix "${install_prefix}"
         --output-dir "${output_dir}"
         --timeout-sec "${timeout_sec}"
+        --wait-iterations "${planner_wait_iterations}"
     )
     if [[ "${dump_stage_tensors}" == "true" ]]; then
         distributed_args+=("--dump-stage-tensors")
@@ -1190,6 +1202,7 @@ else
         --install-prefix "${install_prefix}"
         --output-dir "${output_dir}"
         --timeout-sec "${timeout_sec}"
+        --wait-iterations "${planner_wait_iterations}"
     )
     if [[ "${benchmark_kind}" == "dispatch_hot_loop" ]]; then
         launcher_args+=("--dispatch-modes" "${dispatch_modes[@]}")

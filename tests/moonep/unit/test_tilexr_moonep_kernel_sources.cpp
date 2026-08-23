@@ -189,6 +189,18 @@ int main()
         "SyncFunc<AscendC::HardEvent::MTE3_S>()");
     Contains("URMA Dispatch doorbell", dispatchUrmaKernel,
         "state.qpCtxEntry->dbAddr), 0)");
+    Contains("URMA Dispatch completion accounting", dispatchUrmaKernel,
+        "batchEndCompletionCount = state.completionCount + 1U");
+    Contains("URMA Dispatch completion accounting", dispatchUrmaKernel,
+        "state.completionCount += 1U");
+    Contains("URMA Dispatch SQ drain frontier", dispatchUrmaKernel,
+        "state.finalHead = state.head");
+    Contains("URMA Dispatch SQ drain frontier", dispatchUrmaKernel,
+        "DispatchDrainSqToExpected(state, state.finalHead");
+    Excludes("URMA Dispatch completion accounting", dispatchUrmaKernel,
+        "state.wqeCount += batchCount");
+    Excludes("URMA Dispatch SQ drain frontier", dispatchUrmaKernel,
+        "DispatchDrainSqToExpected(state, state.finalWqeCount");
     Contains("URMA Dispatch fused payload", dispatchUrmaKernel,
         "DispatchDataTaskIsWeight(");
     Contains("URMA Dispatch fused payload", dispatchUrmaKernel,

@@ -108,6 +108,15 @@ int main()
     const std::string legacyProcess = Section(legacyKernel,
         "__aicore__ inline void MoonEpCombineV2::Process()",
         "} // namespace");
+    const std::string legacySubmitPair = Section(legacyKernel,
+        "__aicore__ inline bool MoonEpCombineV2::SubmitPair(",
+        "__aicore__ inline bool MoonEpCombineV2::SendRemoteStep(");
+    const std::string legacySubmitFullmesh = Section(legacyKernel,
+        "__aicore__ inline bool MoonEpCombineV2::SubmitFullmeshBatch(",
+        "__aicore__ inline bool MoonEpCombineV2::SendFullmeshStep(");
+    const std::string legacyFullmeshBuilder = Section(legacyKernel,
+        "inline void MoonEpCombineV2BuildFullmeshPayloadWqesVf(",
+        "#endif");
     const std::string process = Section(groupKernel,
         "__aicore__ inline void MoonEpCombineV2Group::Process()",
         "} // namespace");
@@ -202,6 +211,19 @@ int main()
 
     ok &= Require(legacyKernel, "class MoonEpCombineV2",
         "Legacy Combine V2 implementation is missing");
+    ok &= Require(legacyFullmeshBuilder, "sqe->flag = 0U;",
+        "Legacy fullmesh builder retains an ordered-completion flag from a reused WQE");
+    ok &= Require(legacyKernel,
+        "__aicore__ inline void MoonEpCombineV2::PublishControlToken(",
+        "Legacy Combine V2 must publish UDMA control sources through MTE3");
+    ok &= Require(legacySubmitPair, "PublishControlToken(doneSource,",
+        "Legacy pair completion token bypasses the MTE3 publication helper");
+    ok &= Reject(legacySubmitPair, "\n            *doneSource =",
+        "Legacy pair completion token uses a scalar GM store");
+    ok &= Require(legacySubmitFullmesh, "PublishControlToken(doneSource,",
+        "Legacy fullmesh completion token bypasses the MTE3 publication helper");
+    ok &= Reject(legacySubmitFullmesh, "\n        *doneSource =",
+        "Legacy fullmesh completion token uses a scalar GM store");
     ok &= Require(groupKernel, "namespace TileXRGroup128 {",
         "Group implementation is not isolated in its own namespace");
     ok &= Require(groupKernel, "class MoonEpCombineV2Group",

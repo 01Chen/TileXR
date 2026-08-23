@@ -263,11 +263,29 @@ def test_case_17_selects_mindspeed_model_flow_without_changing_case_16() -> None
     assert 'benchmark_kind="model_flow"' in SCRIPT
     assert 'TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES' in SCRIPT
     assert '768 * 1024 * 1024' in SCRIPT
+    assert (
+        'export TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS='
+        '"${TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS:-100000000}"'
+        in SCRIPT
+    )
     case_16 = SCRIPT.split(
         'elif [[ "${case_id}" == "${plan_reuse_repro_case_id}" ]]', 1
     )[1].split("fi", 1)[0]
     assert 'warmup="${warmup:-0}"' in case_16
     assert 'iterations="${iterations:-8}"' in case_16
+
+
+def test_planner_wait_iterations_reach_local_and_distributed_launchers() -> None:
+    assert (
+        'planner_wait_iterations='
+        '"${TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS:-1000000}"'
+        in SCRIPT
+    )
+    assert (
+        "TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS must be a positive integer"
+        in SCRIPT
+    )
+    assert SCRIPT.count('--wait-iterations "${planner_wait_iterations}"') == 2
 
 
 def test_case_18_through_20_select_rank_matched_model_flows() -> None:
@@ -395,6 +413,7 @@ def test_model_replay_manages_multinode_followers_and_shared_environment() -> No
     assert "model_replay_wait_followers" in SCRIPT
     assert 'model_replay_follower_logs+=("${log_path}")' in SCRIPT
     assert "TILEXR_MINDSPEED_PREWARM_FRAMEWORK_OPS" in SCRIPT
+    assert "TILEXR_MODEL_REPLAY_TILEXR_GIT_SHA" in SCRIPT
     assert "MODEL_REPLAY_CACHE_GENERATION" in SCRIPT
     assert "TILEXR_MOONEP_MODEL_REPLAY_GENERATION" in SCRIPT
 

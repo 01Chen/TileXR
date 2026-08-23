@@ -383,6 +383,7 @@ inline void MoonEpCombineV2BuildFullmeshPayloadWqesVf(
 
     __ubuf__ TileXR::UDMASqeCtx *sqe =
         reinterpret_cast<__ubuf__ TileXR::UDMASqeCtx *>(wqe);
+    sqe->flag = 0U;
     sqe->sqeBbIdx = static_cast<uint16_t>(
         absoluteHead % TileXR::TILEXR_UDMA_SQ_BB_COUNT);
     sqe->owner =
@@ -456,6 +457,8 @@ private:
         uint32_t targetRank, uint64_t remoteOffset,
         __gm__ uint64_t *localSource, uint32_t flag,
         uint32_t transferBytes = sizeof(uint64_t));
+    __aicore__ inline void PublishControlToken(
+        __gm__ uint64_t *destination, uint64_t value);
     __aicore__ inline void CopyIssueToSq(LocalTensor<uint8_t> issue,
         MoonEpCombineV2LaneState &state, uint32_t count);
     __aicore__ inline bool SubmitPair(uint32_t peer, uint32_t step,
@@ -1661,6 +1664,29 @@ __aicore__ inline void MoonEpCombineV2::CopyIssueToSq(
     }
 }
 
+__aicore__ inline void MoonEpCombineV2::PublishControlToken(
+    __gm__ uint64_t *destination, uint64_t value)
+{
+    LocalTensor<uint64_t> token = wqeContextBuf_.Get<uint64_t>();
+    token.SetValue(0U, value);
+    for (uint32_t word = 1U;
+        word < TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes /
+                sizeof(uint64_t);
+        ++word) {
+        token.SetValue(word, 0U);
+    }
+    GlobalTensor<uint8_t> destinationGlobal;
+    destinationGlobal.SetGlobalBuffer(
+        reinterpret_cast<__gm__ uint8_t *>(destination));
+    const DataCopyExtParams copyOut {1U,
+        static_cast<uint32_t>(
+            TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes),
+        0U, 0U, 0U};
+    SyncFunc<HardEvent::S_MTE3>();
+    DataCopyPad(destinationGlobal, token.ReinterpretCast<uint8_t>(), copyOut);
+    SyncFunc<HardEvent::MTE3_S>();
+}
+
 __aicore__ inline bool MoonEpCombineV2::SubmitPair(
     uint32_t peer, uint32_t step, uint32_t chunkStart,
     uint32_t batchOffset, uint32_t batchCount, uint32_t sequenceBase,
@@ -1694,10 +1720,8 @@ __aicore__ inline bool MoonEpCombineV2::SubmitPair(
             __gm__ uint64_t *doneSource = reinterpret_cast<__gm__ uint64_t *>(
                 controlSourceBase_ + static_cast<uint64_t>(lane) *
                     TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
-            *doneSource = TileXRMoonEp::MoonEpCombineV2Token(magic_, step);
-            TileXR::UDMACleanCacheLines(
-                reinterpret_cast<__gm__ uint8_t *>(doneSource),
-                TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
+            PublishControlToken(doneSource,
+                TileXRMoonEp::MoonEpCombineV2Token(magic_, step));
             const uint64_t doneIndex =
                 TileXRMoonEp::MoonEpCombineV2DoneIndex(
                     epoch_, rank_, lane);
@@ -1863,10 +1887,8 @@ __aicore__ inline bool MoonEpCombineV2::SubmitFullmeshBatch(
     if (finalBatch) {
         __gm__ uint64_t *doneSource = reinterpret_cast<__gm__ uint64_t *>(
             controlSourceBase_);
-        *doneSource = TileXRMoonEp::MoonEpCombineV2Token(magic_, step);
-        TileXR::UDMACleanCacheLines(
-            reinterpret_cast<__gm__ uint8_t *>(doneSource),
-            TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
+        PublishControlToken(doneSource,
+            TileXRMoonEp::MoonEpCombineV2Token(magic_, step));
         const uint64_t doneIndex = TileXRMoonEp::MoonEpCombineV2DoneIndex(
             epoch_, rank_, TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT);
         if (!AppendControlWqe(issue, count, fullmeshLane_, fullmeshInfo_,

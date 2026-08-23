@@ -6,6 +6,7 @@ import hashlib
 import json
 import shlex
 import struct
+import subprocess
 import zlib
 from pathlib import Path
 
@@ -688,6 +689,7 @@ def test_runtime_provenance_hashes_real_installed_library_names(tmp_path: Path) 
         "libtile-comm.so",
         "libtilexr-moonep.so",
         "libtilexr-moonep-combine-v2.so",
+        "libtilexr-moonep-reduce-grad.so",
     ):
         payload = f"installed:{name}".encode("ascii")
         (lib_dir / name).write_bytes(payload)
@@ -726,6 +728,41 @@ def test_runtime_provenance_accepts_validated_git_revision_override(
             settings,
             environment={"TILEXR_MODEL_REPLAY_TILEXR_GIT_SHA": "not-a-revision"},
         )
+
+
+def test_runtime_provenance_discovers_firmware_and_soc_from_npu_smi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "model_runner.env"
+    config.write_text("MODEL_RUNNER_NODES=node-a\n", encoding="utf-8")
+    settings = ModelRunnerSettings(
+        source_root=ROOT,
+        config_path=config,
+        shape=_shape(),
+        node_count=1,
+        timeout_seconds=60,
+        profiler_enabled=True,
+    )
+    board_output = """
+        Chip Name                      : Ascend950PR
+        Chip Version                   : V100
+        Firmware Version               : 9.0.0.200.200
+    """
+
+    monkeypatch.setattr(
+        replay_orchestrator.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout=board_output, stderr=""
+        ),
+    )
+    provenance = build_runtime_provenance(
+        settings,
+        environment={"TILEXR_MODEL_REPLAY_TILEXR_GIT_SHA": "a" * 40},
+    )
+
+    assert provenance["firmware"] == "9.0.0.200.200"
+    assert provenance["soc"] == "Ascend950PR-V100"
 
 
 def test_single_node_missing_model_runner_config_is_generated(
